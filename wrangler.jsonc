@@ -19,13 +19,8 @@
   "d1_databases": [
     {
       "binding": "DB_lunar_attendance",
-      "database_name": "lunar-attendance",
-      "database_id": "082886b8-9499-4edd-b9b9-6c72fc6c3d14",
-    },
-    {
-      "binding": "DB_external_dummy",
-      "database_name": "external-dummy",
-      "database_id": "cb10ee54-af35-49a4-855e-8dd9656ada00",
+      "database_name": "DB_lunar_attendance",
+      "database_id": "7f06129a-b946-457c-93c4-afbe9e67ea67",
     },
   ],
   "migrations": [
@@ -45,14 +40,16 @@
   "kv_namespaces": [
     {
       "binding": "KV_lunar_attendance",
-      "id": "bc0dcc72192148d19fb22f2e5e2b4779",
+      "id": "00089b57c2ba450d8a3f961364425f16",
     },
   ],
-
+  "dev": {
+    "ip": "127.0.0.1",
+  },
   "vars": {
-    "EXTERNAL_API": "https://attendance.localsearch.world/external",
-    "APP_URL": "https://attendance.localsearch.world",
-    "QR_SECRET": "replace-with-secret",
+    "EXTERNAL_API": "https://lunar.tejbahadurkarki.name.np/external",
+    "APP_URL": "https://lunar.tejbahadurkarki.name.np",
+    "QR_SECRET": "fjasdfkajsdfksdfeuhfalds",
     "ADMIN_SECRET": "supersecurepassword-",
   },
   /**

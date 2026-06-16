@@ -506,7 +506,7 @@ const IconBack = () => (
 );
 // ── Overview ─────────────────────────────────────────────────────────
 adminRoutes.get("/", async (c) => {
-  const stats = await getAdminStats(c.env.DB_external_dummy);
+  const stats = await getAdminStats(c.env.DB_lunar_attendance);
   return layout(
     c,
     "Overview",
@@ -571,7 +571,7 @@ adminRoutes.get("/", async (c) => {
 // ── Teachers ─────────────────────────────────────────────────────────
 adminRoutes.get("/teachers", async (c) => {
   const search = c.req.query("q");
-  const teachers = await listAllTeachers(c.env.DB_external_dummy, search);
+  const teachers = await listAllTeachers(c.env.DB_lunar_attendance, search);
   return layout(
     c,
     "Manage Teachers",
@@ -686,17 +686,17 @@ adminRoutes.post("/teachers", async (c) => {
     email: string;
     pin: string;
   }>();
-  await createTeacher(c.env.DB_external_dummy, name, email, pin);
+  await createTeacher(c.env.DB_lunar_attendance, name, email, pin);
   return c.redirect("/admin/teachers");
 });
 adminRoutes.post("/teachers/:id/delete", async (c) => {
-  await deleteTeacher(c.env.DB_external_dummy, c.req.param("id"));
+  await deleteTeacher(c.env.DB_lunar_attendance, c.req.param("id"));
   return c.redirect("/admin/teachers");
 });
 // ── Students ─────────────────────────────────────────────────────────
 adminRoutes.get("/students", async (c) => {
   const search = c.req.query("q");
-  const students = await listAllStudents(c.env.DB_external_dummy, search);
+  const students = await listAllStudents(c.env.DB_lunar_attendance, search);
   return layout(
     c,
     "Manage Students",
@@ -800,16 +800,16 @@ adminRoutes.post("/students", async (c) => {
     name: string;
     email: string;
   }>();
-  await createStudent(c.env.DB_external_dummy, name, email);
+  await createStudent(c.env.DB_lunar_attendance, name, email);
   return c.redirect("/admin/students");
 });
 adminRoutes.post("/students/:id/delete", async (c) => {
-  await deleteStudent(c.env.DB_external_dummy, c.req.param("id"));
+  await deleteStudent(c.env.DB_lunar_attendance, c.req.param("id"));
   return c.redirect("/admin/students");
 });
 // ── Classes ──────────────────────────────────────────────────────────
 adminRoutes.get("/classes", async (c) => {
-  const classes = await listAllClasses(c.env.DB_external_dummy);
+  const classes = await listAllClasses(c.env.DB_lunar_attendance);
   return layout(
     c,
     "Classes",
@@ -875,34 +875,34 @@ adminRoutes.post("/classes", async (c) => {
     name: string;
     code: string;
   }>();
-  await createClass(c.env.DB_external_dummy, name, code);
+  await createClass(c.env.DB_lunar_attendance, name, code);
   return c.redirect("/admin/classes");
 });
 adminRoutes.post("/classes/:id/delete", async (c) => {
-  await deleteClass(c.env.DB_external_dummy, c.req.param("id"));
+  await deleteClass(c.env.DB_lunar_attendance, c.req.param("id"));
   return c.redirect("/admin/classes");
 });
 // ── Class Detail (Enrollment & Assignment) ───────────────────────────
 adminRoutes.get("/classes/:id", async (c) => {
   const classId = c.req.param("id");
-  const cls = await getClassFull(c.env.DB_external_dummy, classId);
+  const cls = await getClassFull(c.env.DB_lunar_attendance, classId);
   if (!cls) return c.text("Class not found", 404);
-  const enrolled = await listEnrolledStudents(c.env.DB_external_dummy, classId);
+  const enrolled = await listEnrolledStudents(c.env.DB_lunar_attendance, classId);
   const unenrolled = await listUnenrolledStudents(
-    c.env.DB_external_dummy,
+    c.env.DB_lunar_attendance,
     classId,
   );
-  const assigned = await listAssignedTeachers(c.env.DB_external_dummy, classId);
+  const assigned = await listAssignedTeachers(c.env.DB_lunar_attendance, classId);
   const unassigned = await listUnassignedTeachers(
-    c.env.DB_external_dummy,
+    c.env.DB_lunar_attendance,
     classId,
   );
   const attendanceDays = await listClassAttendanceDays(
-    c.env.DB_external_dummy,
+    c.env.DB_lunar_attendance,
     classId,
   );
   const studentSummaries = await listStudentAttendanceSummaries(
-    c.env.DB_external_dummy,
+    c.env.DB_lunar_attendance,
     classId,
   );
   // Map student IDs to their attendance count for easy display
@@ -933,6 +933,11 @@ adminRoutes.get("/classes/:id", async (c) => {
               {cls.code}
             </span>
           </h1>
+        </div>
+        <div>
+          <a href={`/admin/classes/${classId}/onboarding`} class="btn btn-primary">
+            Student Onboarding QR
+          </a>
         </div>
       </div>
       <div class="class-split">
@@ -1139,10 +1144,57 @@ adminRoutes.get("/classes/:id", async (c) => {
     </>,
   );
 });
+adminRoutes.get("/classes/:id/onboarding", async (c) => {
+  const classId = c.req.param("id");
+  const cls = await getClassFull(c.env.DB_lunar_attendance, classId);
+  if (!cls) return c.text("Class not found", 404);
+
+  const tokenPayload = await import("../lib/token").then((m) =>
+    m.createToken(
+      {
+        type: "new_student",
+        classId,
+        exp: Date.now() + 24 * 60 * 60 * 1000,
+      },
+      c.env.ADMIN_SECRET
+    )
+  );
+  const url = `${new URL(c.req.url).origin}/register?token=${encodeURIComponent(tokenPayload)}`;
+
+  return layout(
+    c,
+    "Class Onboarding QR",
+    "classes",
+    <>
+      <div class="flex-between" style="margin-bottom: 2.5rem;">
+        <div class="gap-2">
+          <a
+            href={`/admin/classes/${classId}`}
+            class="btn btn-secondary btn-icon"
+            title="Back to Class"
+          >
+            <IconBack />
+          </a>
+          <h1 style="margin: 0;">Onboarding QR: {cls.name}</h1>
+        </div>
+      </div>
+      <div class="card" style="text-align: center; padding: 2rem;">
+        <p>Scan this QR to register and enroll in <strong>{cls.name}</strong></p>
+        <div style="background: white; padding: 1rem; display: inline-block; border-radius: 8px;">
+          <img src={`https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(url)}`} alt="Onboarding QR" />
+        </div>
+        <p class="text-muted" style="margin-top: 1rem; word-break: break-all;">
+          <a href={url} target="_blank">{url}</a>
+        </p>
+      </div>
+    </>
+  );
+});
+
 adminRoutes.post("/classes/:id/enroll", async (c) => {
   const { studentId } = await c.req.parseBody<{ studentId: string }>();
   await enrollStudentInClass(
-    c.env.DB_external_dummy,
+    c.env.DB_lunar_attendance,
     studentId,
     c.req.param("id"),
   );
@@ -1151,7 +1203,7 @@ adminRoutes.post("/classes/:id/enroll", async (c) => {
 adminRoutes.post("/classes/:id/unenroll", async (c) => {
   const { studentId } = await c.req.parseBody<{ studentId: string }>();
   await removeStudentFromClass(
-    c.env.DB_external_dummy,
+    c.env.DB_lunar_attendance,
     studentId,
     c.req.param("id"),
   );
@@ -1160,7 +1212,7 @@ adminRoutes.post("/classes/:id/unenroll", async (c) => {
 adminRoutes.post("/classes/:id/assign", async (c) => {
   const { teacherId } = await c.req.parseBody<{ teacherId: string }>();
   await assignTeacherToClass(
-    c.env.DB_external_dummy,
+    c.env.DB_lunar_attendance,
     teacherId,
     c.req.param("id"),
   );
@@ -1169,7 +1221,7 @@ adminRoutes.post("/classes/:id/assign", async (c) => {
 adminRoutes.post("/classes/:id/unassign", async (c) => {
   const { teacherId } = await c.req.parseBody<{ teacherId: string }>();
   await removeTeacherFromClass(
-    c.env.DB_external_dummy,
+    c.env.DB_lunar_attendance,
     teacherId,
     c.req.param("id"),
   );
@@ -1177,7 +1229,7 @@ adminRoutes.post("/classes/:id/unassign", async (c) => {
 });
 // ── Attendance Log ───────────────────────────────────────────────────
 adminRoutes.get("/attendance", async (c) => {
-  const records = await listAllAttendanceRecords(c.env.DB_external_dummy);
+  const records = await listAllAttendanceRecords(c.env.DB_lunar_attendance);
   return layout(
     c,
     "Attendance Log",
@@ -1266,12 +1318,12 @@ adminRoutes.get("/attendance", async (c) => {
   );
 });
 adminRoutes.post("/attendance/:id/delete", async (c) => {
-  await deleteAttendanceRecord(c.env.DB_external_dummy, c.req.param("id"));
+  await deleteAttendanceRecord(c.env.DB_lunar_attendance, c.req.param("id"));
   return c.redirect("/admin/attendance");
 });
 adminRoutes.get("/attendance/export", async (c) => {
   const records = await listAllAttendanceRecordsForExport(
-    c.env.DB_external_dummy,
+    c.env.DB_lunar_attendance,
   );
   const headers = [
     "Date",

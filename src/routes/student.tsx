@@ -1,17 +1,20 @@
 /** @jsxImportSource hono/jsx */
 import { Hono } from "hono";
 import type { Context } from "hono";
+import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import { Env } from "../types";
-import { claimStudentAccessGrant } from "../lib/externalDummy";
+import { 
+  createStudentWithContact, 
+  enrollStudentInClass, 
+  getClassFull, 
+  getStudentBySessionToken, 
+  createStudentSession 
+} from "../lib/externalDummy";
+import { verifyToken } from "../lib/token";
 import { rateLimit, requestIp } from "../lib/rateLimit";
 
+export const STUDENT_SESSION_COOKIE = "student_session";
 export const studentRoutes = new Hono<{ Bindings: Env }>();
-type AppContext = Context<{ Bindings: Env }>;
-
-function boundedFormText(value: unknown, maxLength: number) {
-  const text = String(value ?? "").trim();
-  return text.length <= maxLength ? text : "";
-}
 
 const studentStyles = `
   @import url("https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800;900&display=swap");
@@ -28,6 +31,7 @@ const studentStyles = `
     --surface: rgba(255, 255, 255, 0.88);
     --success: #15803d;
     --danger: #b91c1c;
+    --bg: #f8fafc;
   }
   * { box-sizing: border-box; }
   body {
@@ -42,7 +46,6 @@ const studentStyles = `
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     color: var(--ink);
-    text-align: center;
     background:
       radial-gradient(circle at 18% -12%, color-mix(in srgb, var(--primary), white 84%) 0, rgba(255,255,255,0) 30rem),
       linear-gradient(145deg, #fbfcff 0%, #f7f8ff 44%, #f8fafc 100%);
@@ -55,6 +58,7 @@ const studentStyles = `
     background: var(--surface);
     box-shadow: 0 22px 58px rgba(15, 23, 42, 0.1);
     outline: 1px solid var(--line);
+    text-align: center;
   }
   .eyebrow {
     color: var(--primary);
@@ -64,11 +68,36 @@ const studentStyles = `
     text-transform: uppercase;
     margin-bottom: 8px;
   }
-  h1, h2 { margin: 0; line-height: 1.15; letter-spacing: 0; }
-  h1 { font-size: 29px; font-weight: 900; }
-  h2 { font-size: 24px; font-weight: 800; }
+  h1 { margin: 0; line-height: 1.15; letter-spacing: 0; font-size: 29px; font-weight: 900; }
   p { margin: 10px 0 0; color: #475569; line-height: 1.62; font-weight: 500; }
-  .helper { margin-top: 14px; font-size: 14px; }
+  
+  .form-group {
+    margin-top: 20px;
+    text-align: left;
+  }
+  .form-group label {
+    display: block;
+    font-size: 14px;
+    font-weight: 700;
+    margin-bottom: 8px;
+    color: var(--ink);
+  }
+  .form-group input {
+    width: 100%;
+    padding: 12px 16px;
+    border: 1px solid var(--line);
+    border-radius: 0.85rem;
+    font-family: inherit;
+    font-size: 16px;
+    background: white;
+    transition: all 0.2s;
+  }
+  .form-group input:focus {
+    outline: none;
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px var(--primary-soft);
+  }
+  
   .status {
     margin-top: 20px;
     padding: 14px 15px;
@@ -79,233 +108,280 @@ const studentStyles = `
     font-size: 18px;
     font-weight: 800;
     line-height: 1.4;
-    font-variant-numeric: tabular-nums;
+    text-align: center;
   }
-  .success { color: var(--success); }
-  .error { color: var(--danger); }
   .status.success { background: #ecfdf5; border-color: #bbf7d0; color: var(--success); }
   .status.error { background: #fef2f2; border-color: #fecaca; color: var(--danger); }
-  #msg.success { background: #ecfdf5; border-color: #bbf7d0; color: var(--success); }
-  #msg.error { background: #fef2f2; border-color: #fecaca; color: var(--danger); }
-  form { margin-top: 20px; }
+  
   button {
-    min-height: 44px;
+    margin-top: 24px;
+    min-height: 48px;
     width: 100%;
     border: 0;
     border-radius: 0.85rem;
     background: var(--primary);
     color: white;
     font: inherit;
+    font-size: 16px;
     font-weight: 900;
     cursor: pointer;
+    transition: opacity 0.2s;
   }
+  button:hover { opacity: 0.9; }
 `;
 
-// ── Student access token claim ────────────────────────────────────
-function studentAccessPage(
-  c: AppContext,
-  options: {
-    token?: string;
-    accessToken?: string;
-    studentName?: string;
-    error?: string;
-  },
-) {
-  return c.html(
+function RegistrationLayout({ title, children }: { title: string, children: any }) {
+  return (
     <html>
       <head>
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <title>Student Access</title>
-        <style>{studentStyles}</style>
+        <title>{title}</title>
+        <style dangerouslySetInnerHTML={{ __html: studentStyles }} />
       </head>
       <body>
         <div class="panel">
-          <div class="eyebrow">Student access</div>
-          {options.accessToken ? (
-            <>
-              <h1>Access saved on this browser</h1>
-              <div class="status success">Ready for attendance QRs</div>
-              <p class="helper">
-                {options.studentName}, this browser can now mark attendance for
-                every class linked to your student account.
-              </p>
-              <script
-                dangerouslySetInnerHTML={{
-                  __html: `localStorage.setItem('access_token', ${JSON.stringify(options.accessToken)})`,
-                }}
-              />
-            </>
-          ) : options.token ? (
-            <>
-              <h1>Save access on this browser</h1>
-              <p class="helper">
-                Continue only on the device you will use to scan attendance QRs.
-              </p>
-              <form method="post" action="/student/access">
-                <input type="hidden" name="token" value={options.token} />
-                <button type="submit">Save student access</button>
-              </form>
-            </>
-          ) : (
-            <>
-              <h1>Access could not be saved</h1>
-              <div class="status error">{options.error}</div>
-              <p class="helper">
-                Ask your teacher for a fresh access QR if this one was already
-                used or expired.
-              </p>
-            </>
-          )}
+          {children}
         </div>
       </body>
-    </html>,
+    </html>
   );
 }
 
-studentRoutes.get("/student/access", (c) => {
-  const token = c.req.query("t") ?? c.req.query("token") ?? "";
-  return studentAccessPage(
-    c,
-    token ? { token } : { error: "Access QR token missing" },
-  );
-});
+// ── Student Registration & Login ────────────────────────────────────
 
-studentRoutes.post("/student/access", async (c) => {
-  const claimLimit = await rateLimit(
-    c.env.KV_lunar_attendance,
-    `student-access:${requestIp(c.req.raw)}`,
-    10,
-    5 * 60,
-  );
-  if (!claimLimit.allowed) {
-    return studentAccessPage(c, {
-      error: "Too many access attempts. Ask your teacher for help.",
-    });
-  }
-
-  const body = await c.req.parseBody();
-  const token = boundedFormText(body.token, 200);
-
+studentRoutes.get("/register", async (c) => {
+  const token = c.req.query("token") ?? c.req.query("t");
   if (!token) {
-    return studentAccessPage(c, { error: "Access QR token missing" });
-  }
-
-  try {
-    const result = await claimStudentAccessGrant(
-      c.env.DB_external_dummy,
-      token,
+    return c.html(
+      <RegistrationLayout title="Error">
+        <div class="eyebrow">Error</div>
+        <h1>Missing QR Token</h1>
+        <p>Please scan a valid student onboarding or access QR code.</p>
+      </RegistrationLayout>
     );
-
-    if (result.ok) {
-      return studentAccessPage(c, {
-        accessToken: result.accessToken,
-        studentName: result.student.name,
-      });
-    }
-
-    return studentAccessPage(c, { error: result.error });
-  } catch {
-    return studentAccessPage(c, { error: "Could not reach access server" });
   }
+
+  const payload = await verifyToken(token, c.env.ADMIN_SECRET);
+  if (!payload) {
+    return c.html(
+      <RegistrationLayout title="Expired QR">
+        <div class="eyebrow">Error</div>
+        <h1>QR Code Expired</h1>
+        <div class="status error">Token is invalid or expired</div>
+        <p>This QR code has expired or is invalid. Please ask your teacher for a new one.</p>
+      </RegistrationLayout>
+    );
+  }
+
+  // Handle returning student directly logging in
+  if (payload.type === "returning_student") {
+    const { sessionId, expiresAt } = await createStudentSession(c.env.DB_lunar_attendance, payload.studentId);
+    setCookie(c, STUDENT_SESSION_COOKIE, sessionId, {
+      path: "/",
+      httpOnly: true,
+      secure: new URL(c.req.url).protocol === "https:",
+      sameSite: "Lax",
+      expires: new Date(expiresAt * 1000),
+    });
+
+    return c.html(
+      <RegistrationLayout title="Access Granted">
+        <div class="eyebrow">Welcome Back</div>
+        <h1>Device Authorized</h1>
+        <div class="status success">Ready for Attendance</div>
+        <p>Your session has been securely saved to this device. You can now use this device to scan the static attendance QR in class.</p>
+      </RegistrationLayout>
+    );
+  }
+
+  // Handle new student registration form
+  const cls = await getClassFull(c.env.DB_lunar_attendance, payload.classId);
+  if (!cls) {
+    return c.text("Class not found", 404);
+  }
+
+  return c.html(
+    <RegistrationLayout title="Student Registration">
+      <div class="eyebrow">New Student</div>
+      <h1>Register for {cls.name}</h1>
+      <p>Fill out your details to enroll in the class and link your device.</p>
+      <form method="post" action="/register">
+        <input type="hidden" name="token" value={token} />
+        
+        <div class="form-group">
+          <label>Full Name</label>
+          <input type="text" name="name" required placeholder="John Doe" />
+        </div>
+        
+        <div class="form-group">
+          <label>Email Address</label>
+          <input type="email" name="email" required placeholder="john@example.com" />
+        </div>
+
+        <div class="form-group">
+          <label>Contact Number</label>
+          <input type="tel" name="contactNumber" required placeholder="+1 234 567 8900" />
+        </div>
+
+        <div class="form-group">
+          <label>Secondary Contact (Optional)</label>
+          <input type="tel" name="secondaryContact" placeholder="Parent or Guardian" />
+        </div>
+
+        <button type="submit">Complete Registration</button>
+      </form>
+    </RegistrationLayout>
+  );
 });
+
+studentRoutes.post("/register", async (c) => {
+  const body = await c.req.parseBody<{
+    token: string;
+    name: string;
+    email: string;
+    contactNumber: string;
+    secondaryContact: string;
+  }>();
+
+  if (!body.token) return c.text("Missing token", 400);
+
+  const payload = await verifyToken(body.token, c.env.ADMIN_SECRET);
+  if (!payload || payload.type !== "new_student") {
+    return c.html(
+      <RegistrationLayout title="Expired QR">
+        <div class="eyebrow">Error</div>
+        <h1>QR Code Expired</h1>
+        <div class="status error">Token is invalid or expired</div>
+        <p>Please ask your teacher for a new onboarding QR code.</p>
+      </RegistrationLayout>
+    );
+  }
+
+  const { id: studentId } = await createStudentWithContact(
+    c.env.DB_lunar_attendance,
+    body.name,
+    body.email,
+    body.contactNumber,
+    body.secondaryContact || ""
+  );
+
+  await enrollStudentInClass(c.env.DB_lunar_attendance, studentId, payload.classId);
+
+  const { sessionId, expiresAt } = await createStudentSession(c.env.DB_lunar_attendance, studentId);
+  setCookie(c, STUDENT_SESSION_COOKIE, sessionId, {
+    path: "/",
+    httpOnly: true,
+    secure: new URL(c.req.url).protocol === "https:",
+    sameSite: "Lax",
+    expires: new Date(expiresAt * 1000),
+  });
+
+  return c.html(
+    <RegistrationLayout title="Registration Complete">
+      <div class="eyebrow">Success</div>
+      <h1>Registration Complete!</h1>
+      <div class="status success">Device Linked</div>
+      <p>Welcome, {body.name}. You are now enrolled and your device is ready to scan the attendance QR in class.</p>
+    </RegistrationLayout>
+  );
+});
+
+// ── Deprecated local storage routes handling ──────────────────────
+
+studentRoutes.get("/student/access", (c) => c.redirect("/register"));
+studentRoutes.get("/student/enroll", (c) => c.redirect("/register"));
 
 // ── Attendance scan landing ────────────────────────────────────────
-studentRoutes.get("/attend", (c) => {
+
+studentRoutes.get("/attend", async (c) => {
   const sessionId = c.req.query("s") ?? "";
-  const qrToken = c.req.query("q") ?? "";
+  
+  // Verify standard cookie session instead of localStorage
+  const sessionToken = getCookie(c, STUDENT_SESSION_COOKIE);
+  const student = sessionToken 
+    ? await getStudentBySessionToken(c.env.DB_lunar_attendance, sessionToken)
+    : null;
+
   return c.html(
-    <html>
-      <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <RegistrationLayout title="Mark Attendance">
+      <div class="eyebrow">Scan</div>
+      <h1>Checking Attendance</h1>
+      <p>Keep this page open until your attendance result appears.</p>
+      <div id="msg" class="status">
+        Submitting attendance...
+      </div>
+      <div id="actions" style="display: none; gap: 10px; margin-top: 20px;">
+        <button id="btn-stay" style="background: var(--primary);">I will stay some more time</button>
+        <button id="btn-checkout" style="background: var(--danger);">Checkout anyway</button>
+      </div>
 
-        <title>Mark Attendance</title>
-        <style>{studentStyles}</style>
-      </head>
-      <body>
-        <main class="panel">
-          <div class="eyebrow">Scan</div>
-          <h1>Checking attendance QR</h1>
-          <p>Keep this page open until your attendance result appears.</p>
-          <div id="msg" class="status">
-            Submitting attendance...
-          </div>
-        </main>
-        <script
-          dangerouslySetInnerHTML={{
-            __html: `
-          const sessionId = ${JSON.stringify(sessionId)}
-          const qrToken   = ${JSON.stringify(qrToken)}
-          const accessToken = localStorage.getItem('access_token')
-          const metadata = {
-            clientTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-            clientLanguage: navigator.language,
-            clientPlatform: navigator.platform,
-            screenSize: window.screen ? window.screen.width + 'x' + window.screen.height : undefined
-          }
+      <script
+        dangerouslySetInnerHTML={{
+          __html: `
+        const sessionId = ${JSON.stringify(sessionId)};
+        const hasSession = ${JSON.stringify(!!student)};
+        const msg = document.getElementById('msg');
+        const actions = document.getElementById('actions');
 
-          const msg = document.getElementById('msg')
+        const metadata = {
+          clientTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+          clientLanguage: navigator.language,
+          clientPlatform: navigator.platform,
+          screenSize: window.screen ? window.screen.width + 'x' + window.screen.height : undefined
+        };
 
-          if (!accessToken) {
-            msg.textContent = 'No access token found. Scan the student access QR first.'
-            msg.className = 'status error'
-          } else {
+        if (!hasSession) {
+          msg.textContent = 'Session not found. Please scan the student access QR first to log in.';
+          msg.className = 'status error';
+        } else {
+          function submitAttendance(checkoutAnyway = false) {
+            msg.textContent = 'Submitting attendance...';
+            msg.className = 'status';
+            actions.style.display = 'none';
+
             fetch('/api/attend', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ sessionId, qrToken, accessToken, metadata })
+              body: JSON.stringify({ sessionId, checkoutAnyway, metadata })
             })
             .then(r => r.json())
             .then(data => {
-              if (data.nextAccessToken) {
-                localStorage.setItem('access_token', data.nextAccessToken)
-              }
-              if (data.alreadyMarked) {
-                msg.textContent = 'Already present: ' + data.studentName + ', you are marked for today.'
-                msg.className = 'status success'
+              if (data.warning) {
+                msg.textContent = data.warning;
+                msg.className = 'status error';
+                actions.style.display = 'flex';
+                
+                document.getElementById('btn-stay').onclick = () => {
+                  msg.textContent = 'Attendance preserved. You may close this page.';
+                  msg.className = 'status success';
+                  actions.style.display = 'none';
+                };
+                
+                document.getElementById('btn-checkout').onclick = () => {
+                  submitAttendance(true);
+                };
+              } else if (data.checkedOut) {
+                msg.textContent = 'Checked out: ' + data.studentName + '. Have a good day!';
+                msg.className = 'status success';
+              } else if (data.alreadyMarked) {
+                msg.textContent = 'Already marked present today: ' + data.studentName;
+                msg.className = 'status success';
               } else if (data.ok) {
-                msg.textContent = 'Present: ' + data.studentName + ', your attendance is saved.'
-                msg.className = 'status success'
+                msg.textContent = 'Present: ' + data.studentName + ', your attendance is saved.';
+                msg.className = 'status success';
               } else {
-                msg.textContent = data.error ?? 'Something went wrong'
-                msg.className = 'status error'
-                if ((data.error ?? '').toLowerCase().includes('access token')) {
-                  localStorage.removeItem('access_token')
-                }
+                msg.textContent = data.error ?? 'Something went wrong';
+                msg.className = 'status error';
               }
             })
-            .catch(() => { msg.textContent = 'Network error'; msg.className = 'status error' })
+            .catch(() => { msg.textContent = 'Network error'; msg.className = 'status error' });
           }
-        `,
-          }}
-        />
-      </body>
-    </html>,
-  );
-});
-
-// ── Student enrollment — get access token ─────────────────────────
-studentRoutes.get("/student/enroll", async (c) => {
-  const t = c.req.query("t") ?? "";
-  if (t) return c.redirect(`/student/access?t=${encodeURIComponent(t)}`);
-
-  return c.html(
-    <html>
-      <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-
-        <title>Enrollment</title>
-        <style>{studentStyles}</style>
-      </head>
-      <body>
-        <main class="panel">
-          <div class="eyebrow">Access</div>
-          <h1>Enrollment moved</h1>
-          <p>
-            Student access now starts from the one-time QR on the teacher roster
-            page. Scan that QR on the device you will use for attendance.
-          </p>
-        </main>
-      </body>
-    </html>,
+          
+          submitAttendance();
+        }
+      `,
+        }}
+      />
+    </RegistrationLayout>
   );
 });

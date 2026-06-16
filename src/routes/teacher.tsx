@@ -274,7 +274,7 @@ async function currentTeacher(c: AppContext) {
   const token = getCookie(c, TEACHER_SESSION_COOKIE);
   if (!token) return null;
 
-  return getTeacherBySessionToken(c.env.DB_external_dummy, token);
+  return getTeacherBySessionToken(c.env.DB_lunar_attendance, token);
 }
 
 async function currentTeacherSession(c: AppContext) {
@@ -282,7 +282,7 @@ async function currentTeacherSession(c: AppContext) {
   if (!token) return null;
 
   const teacher = await getTeacherBySessionToken(
-    c.env.DB_external_dummy,
+    c.env.DB_lunar_attendance,
     token,
   );
   return teacher ? { token, teacher } : null;
@@ -311,7 +311,7 @@ async function requireRecentTeacherPin(
 ) {
   const token = getCookie(c, TEACHER_SESSION_COOKIE);
   const verified = await isTeacherPinRecentlyVerified(
-    c.env.DB_external_dummy,
+    c.env.DB_lunar_attendance,
     token,
   );
   if (verified) return null;
@@ -322,6 +322,8 @@ async function requireRecentTeacherPin(
 }
 
 function layout(title: string, teacher: ExternalTeacher | null, children: any) {
+  const isDisplayRole = teacher?.role === "attendance_display";
+
   return (
     <html>
       <head>
@@ -333,9 +335,11 @@ function layout(title: string, teacher: ExternalTeacher | null, children: any) {
         <div class="shell">
           <header class="topbar">
             <div class="topbar-inner">
-              <a class="brand" href="/teacher/class">
-                Attendance
-              </a>
+              {isDisplayRole ? (
+                <span class="brand">Attendance Display</span>
+              ) : (
+                <a class="brand" href="/teacher/class">Attendance</a>
+              )}
               {teacher ? (
                 <div class="nav">
                   <span>{teacher.name}</span>
@@ -421,13 +425,13 @@ async function loadOwnedClass(c: AppContext, teacher: ExternalTeacher) {
   const classId = c.req.param("classId") || c.req.param("classid");
   if (!classId) return null;
   const allowed = await teacherCanAccessClass(
-    c.env.DB_external_dummy,
+    c.env.DB_lunar_attendance,
     teacher.id,
     classId,
   );
   if (!allowed) return null;
 
-  return getClassById(c.env.DB_external_dummy, classId);
+  return getClassById(c.env.DB_lunar_attendance, classId);
 }
 
 teacherRoutes.get("/dashboard", (c) => c.redirect("/teacher/class"));
@@ -448,54 +452,37 @@ teacherRoutes.post("/verify-pin", async (c) => {
 
   const body = await c.req.parseBody();
   const next = safeNext(String(body.next ?? "/teacher/class"));
-  const pin = boundedFormText(body.pin, 32);
-  const pinLimit = await rateLimit(
-    c.env.KV_lunar_attendance,
-    `teacher-pin:${requestIp(c.req.raw)}:${session.teacher.id}`,
-    5,
-    5 * 60,
-  );
-  if (!pinLimit.allowed) {
-    return c.html(
-      pinVerifyPage(
-        session.teacher,
-        next,
-        "Too many PIN attempts. Try again in a few minutes.",
-      ),
-      429,
-    );
-  }
 
-  const ok = await verifyTeacherSessionPin(
-    c.env.DB_external_dummy,
+  const valid = await verifyTeacherSessionPin(
+    c.env.DB_lunar_attendance,
     session.token,
-    pin,
+    String(body.pin ?? ""),
   );
-  if (!ok) {
-    return c.html(pinVerifyPage(session.teacher, next, "Invalid PIN"), 401);
+
+  if (!valid) {
+    return c.html(pinVerifyPage(session.teacher, next, "Incorrect PIN"), 403);
   }
 
   return c.redirect(next);
 });
 
+teacherRoutes.get("/login", async (c) => {
+  const teacher = await currentTeacher(c);
+  if (teacher) return c.redirect("/teacher/class");
+  return c.html(loginPage());
+});
+
 teacherRoutes.post("/login", async (c) => {
   const body = await c.req.parseBody();
-  const email = boundedFormText(body.email, 254);
-  const pin = boundedFormText(body.pin, 32);
-  const loginLimit = await rateLimit(
-    c.env.KV_lunar_attendance,
-    `teacher-login:${requestIp(c.req.raw)}:${email.trim().toLowerCase()}`,
-    8,
-    5 * 60,
-  );
-  if (!loginLimit.allowed) {
-    return c.html(
-      loginPage("Too many sign-in attempts. Try again in a few minutes."),
-      429,
-    );
+  const email = boundedFormText(body.email, 120);
+  const pin = boundedFormText(body.pin, 20);
+
+  if (!email || !pin) {
+    return c.html(loginPage("Email and PIN are required"), 400);
   }
+
   const teacher = await findTeacherByCredentials(
-    c.env.DB_external_dummy,
+    c.env.DB_lunar_attendance,
     email,
     pin,
   );
@@ -505,7 +492,7 @@ teacherRoutes.post("/login", async (c) => {
   }
 
   const session = await createTeacherSession(
-    c.env.DB_external_dummy,
+    c.env.DB_lunar_attendance,
     teacher.id,
   );
   setCookie(c, TEACHER_SESSION_COOKIE, session.token, {
@@ -521,7 +508,7 @@ teacherRoutes.post("/login", async (c) => {
 
 teacherRoutes.post("/logout", async (c) => {
   const token = getCookie(c, TEACHER_SESSION_COOKIE);
-  if (token) await deleteTeacherSession(c.env.DB_external_dummy, token);
+  if (token) await deleteTeacherSession(c.env.DB_lunar_attendance, token);
   deleteCookie(c, TEACHER_SESSION_COOKIE, { path: "/" });
   return c.redirect("/teacher/class");
 });
@@ -530,16 +517,52 @@ teacherRoutes.get("/class", async (c) => {
   const teacher = await currentTeacher(c);
   if (!teacher) return c.html(loginPage());
 
-  const classes = await listTeacherClasses(c.env.DB_external_dummy, teacher.id);
+  const classes = await listTeacherClasses(c.env.DB_lunar_attendance, teacher.id);
   const classCards = await Promise.all(
     classes.map(async (classItem) => ({
       ...classItem,
       studentCount: await countClassStudents(
-        c.env.DB_external_dummy,
+        c.env.DB_lunar_attendance,
         classItem.id,
       ),
     })),
   );
+
+  if (teacher.role === "attendance_display") {
+    if (classCards.length === 1) {
+      return c.redirect(`/teacher/class/${classCards[0].id}/attendance/start`);
+    }
+    return c.html(
+      layout(
+        "Display Mode",
+        teacher,
+        <>
+          <div class="page-head">
+            <div class="page-copy">
+              <h1>Select Class</h1>
+              <p>Choose a class to start displaying the attendance QR code.</p>
+            </div>
+          </div>
+          <div class="grid">
+            {classCards.map((classItem) => (
+              <article class="card class-card">
+                <div class="class-top">
+                  <div>
+                    <span class="class-code">{classItem.code}</span>
+                    <p>{classItem.name}</p>
+                  </div>
+                </div>
+                <div class="actions">
+                  <a class="button" href={`/teacher/class/${classItem.id}/attendance/start`}>Display QR</a>
+                </div>
+              </article>
+            ))}
+          </div>
+        </>
+      )
+    );
+  }
+
   const totalStudents = classCards.reduce(
     (total, classItem) => total + classItem.studentCount,
     0,
@@ -628,7 +651,7 @@ teacherRoutes.get("/class/:classId/student", async (c) => {
   if (!classItem) return c.text("Class not found", 404);
 
   const students = await listClassStudents(
-    c.env.DB_external_dummy,
+    c.env.DB_lunar_attendance,
     classItem.id,
   );
   return c.html(
@@ -736,7 +759,7 @@ teacherRoutes.get("/class/:classId/attendance", async (c) => {
   const classItem = await loadOwnedClass(c, teacher);
   if (!classItem) return c.text("Class not found", 404);
 
-  const rosterSizeRow = await c.env.DB_external_dummy.prepare(
+  const rosterSizeRow = await c.env.DB_lunar_attendance.prepare(
     `SELECT COUNT(*) AS total
          FROM student_classes
         WHERE class_id = ?`,
@@ -746,7 +769,7 @@ teacherRoutes.get("/class/:classId/attendance", async (c) => {
   const rosterSize = rosterSizeRow?.total ?? 0;
 
   const attendanceDays = await listClassAttendanceDays(
-    c.env.DB_external_dummy,
+    c.env.DB_lunar_attendance,
     classItem.id,
   );
 
@@ -872,6 +895,8 @@ teacherRoutes.get("/class/:classId/attendance/start", async (c) => {
   const pinResponse = await requireRecentTeacherPin(c, teacher);
   if (pinResponse) return pinResponse;
 
+  const isDisplayRole = teacher.role === "attendance_display";
+
   return c.html(
     <html>
       <head>
@@ -885,17 +910,25 @@ teacherRoutes.get("/class/:classId/attendance/start", async (c) => {
         <div class="shell">
           <header class="topbar">
             <div class="topbar-inner">
-              <a class="brand" href="/teacher/class">
-                Attendance
-              </a>
+              {isDisplayRole ? (
+                <span class="brand">Attendance Display</span>
+              ) : (
+                <a class="brand" href="/teacher/class">Attendance</a>
+              )}
               <div class="nav">
                 <span>{teacher.name}</span>
-                <a
-                  class="button secondary"
-                  href={`/teacher/class/${classItem.id}/attendance`}
-                >
-                  Back to stats
-                </a>
+                {!isDisplayRole ? (
+                  <a
+                    class="button secondary"
+                    href={`/teacher/class/${classItem.id}/attendance`}
+                  >
+                    Back to stats
+                  </a>
+                ) : (
+                  <form method="post" action="/teacher/logout" style="margin:0;">
+                    <button class="secondary" type="submit">Sign out</button>
+                  </form>
+                )}
               </div>
             </div>
           </header>
@@ -905,12 +938,11 @@ teacherRoutes.get("/class/:classId/attendance/start", async (c) => {
                 <div class="eyebrow">{classItem.code}</div>
                 <h1>Live attendance</h1>
                 <p>
-                  Keep this screen visible during class. The QR refreshes
-                  automatically and each successful scan appears in the log.
+                  Keep this screen visible during class. The QR is static, but each successful scan appears in the log automatically.
                 </p>
               </div>
               <button id="restartBtn" class="secondary" type="button">
-                New QR
+                Restart Session
               </button>
             </div>
             <div class="live-grid">
@@ -919,8 +951,7 @@ teacherRoutes.get("/class/:classId/attendance/start", async (c) => {
                   <div>
                     <h2>Student scan code</h2>
                     <p>
-                      Students scan this code from the browser that claimed
-                      their access QR.
+                      Students scan this code from their registered device.
                     </p>
                   </div>
                 </div>
@@ -977,11 +1008,14 @@ teacherRoutes.get("/class/:classId/attendance/start", async (c) => {
             ws = new WebSocket(protocol + '//' + location.host + '/api/sessions/' + sessionId + '/ws')
             ws.onmessage = (event) => {
               const msg = JSON.parse(event.data)
-              if (msg.type === 'qr_ready') renderQr(msg.url)
+              if (msg.type === 'connected') {
+                renderQr(msg.url)
+                document.getElementById('status').textContent = 'Listening for scans...'
+                document.getElementById('status').style.color = 'var(--success)'
+              }
               if (msg.type === 'attended') {
-                showAttended(msg.studentName, msg.alreadyMarked)
-                setTimeout(() => renderQr(msg.url), 1200)
-                appendLog(msg.studentName, msg.alreadyMarked)
+                showAttended(msg.studentName, msg.alreadyMarked, msg.checkedOut)
+                appendLog(msg.studentName, msg.alreadyMarked, msg.checkedOut)
               }
             }
             let reconnectDelay = 1000;
@@ -998,16 +1032,26 @@ teacherRoutes.get("/class/:classId/attendance/start", async (c) => {
             document.getElementById('scan-url').textContent = url
           }
 
-          function showAttended(name, alreadyMarked) {
+          function showAttended(name, alreadyMarked, checkedOut) {
             const status = document.getElementById('status')
-            status.textContent = alreadyMarked ? name + ' was already present' : name + ' marked present'
+            if (checkedOut) {
+              status.textContent = name + ' checked out'
+            } else {
+              status.textContent = alreadyMarked ? name + ' was already present' : name + ' marked present'
+            }
             clearTimeout(statusTimer)
-            statusTimer = setTimeout(() => status.textContent = '', 3500)
+            statusTimer = setTimeout(() => {
+              status.textContent = 'Listening for scans...'
+            }, 3500)
           }
 
-          function appendLog(name, alreadyMarked) {
+          function appendLog(name, alreadyMarked, checkedOut) {
             const row = document.createElement('p')
-            row.textContent = name + (alreadyMarked ? ' already present - ' : ' - ') + new Date().toLocaleTimeString()
+            let actionText = ' - ';
+            if (checkedOut) actionText = ' checked out - ';
+            else if (alreadyMarked) actionText = ' already present - ';
+            
+            row.textContent = name + actionText + new Date().toLocaleTimeString()
             const log = document.getElementById('log')
             const empty = log.querySelector('[data-empty-log]')
             if (empty) empty.remove()
@@ -1018,6 +1062,7 @@ teacherRoutes.get("/class/:classId/attendance/start", async (c) => {
 
           function showError(error) {
             document.getElementById('status').textContent = error.message
+            document.getElementById('status').style.color = 'var(--danger)'
           }
 
           startSession().catch(showError)
@@ -1039,11 +1084,11 @@ teacherRoutes.get("/class/:classId/student/attendance", async (c) => {
   if (pinResponse) return pinResponse;
 
   const students = await listClassStudents(
-    c.env.DB_external_dummy,
+    c.env.DB_lunar_attendance,
     classItem.id,
   );
   const rows = await listStudentAttendanceSummaries(
-    c.env.DB_external_dummy,
+    c.env.DB_lunar_attendance,
     classItem.id,
   );
   const byStudent = new Map(rows.map((row) => [row.studentId, row]));
@@ -1144,14 +1189,14 @@ teacherRoutes.get(
 
     const studentId = c.req.param("studentId");
     const student = await getClassStudent(
-      c.env.DB_external_dummy,
+      c.env.DB_lunar_attendance,
       classItem.id,
       studentId,
     );
     if (!student) return c.text("Student not found", 404);
 
     const rows = await listStudentAttendanceRecords(
-      c.env.DB_external_dummy,
+      c.env.DB_lunar_attendance,
       classItem.id,
       student.id,
     );
@@ -1254,18 +1299,23 @@ teacherRoutes.get("/class/:classId/student/:studentId/access", async (c) => {
 
   const studentId = c.req.param("studentId");
   const student = await getClassStudent(
-    c.env.DB_external_dummy,
+    c.env.DB_lunar_attendance,
     classItem.id,
     studentId,
   );
   if (!student) return c.text("Student not found", 404);
 
-  const grant = await createStudentAccessGrant(
-    c.env.DB_external_dummy,
-    student.id,
-    teacher.id,
+  const tokenPayload = await import("../lib/token").then((m) =>
+    m.createToken(
+      {
+        type: "returning_student",
+        studentId: student.id,
+        exp: Date.now() + 24 * 60 * 60 * 1000,
+      },
+      c.env.ADMIN_SECRET
+    )
   );
-  const accessUrl = `${new URL(c.req.url).origin}/student/access?t=${encodeURIComponent(grant.token)}`;
+  const accessUrl = `${new URL(c.req.url).origin}/register?token=${encodeURIComponent(tokenPayload)}`;
 
   return c.html(
     <html>
@@ -1327,11 +1377,8 @@ teacherRoutes.get("/class/:classId/student/:studentId/access", async (c) => {
                 <h2>{student.name}</h2>
                 <p>{student.email}</p>
                 <ul class="support-list">
-                  <li>
-                    QR expires at{" "}
-                    {new Date(grant.expiresAt * 1000).toLocaleString()}.
-                  </li>
-                  <li>QR can only be claimed once.</li>
+                  <li>QR expires in 24 hours.</li>
+                  <li>QR can only be used once to set up your session.</li>
                   <li>
                     Access works across all classes where this student is
                     enrolled.

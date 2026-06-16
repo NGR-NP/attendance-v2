@@ -3,7 +3,7 @@ import { Hono } from "hono";
 import { getCookie } from "hono/cookie";
 import { Env } from "./types";
 import { teacherRoutes } from "./routes/teacher";
-import { studentRoutes } from "./routes/student";
+import { studentRoutes, STUDENT_SESSION_COOKIE } from "./routes/student";
 import { adminRoutes } from "./routes/admin";
 import {
   AttendanceScanMetadata,
@@ -15,6 +15,8 @@ import {
   TEACHER_SESSION_COOKIE,
   teacherCanAccessClass,
   verifyStudentAccessForClass,
+  getStudentBySessionToken,
+  touchStudentSession,
 } from "./lib/externalDummy";
 import { localDateKey, SQLITE_LOCALTIME_MODIFIER } from "./lib/date";
 import { rateLimit, requestIp } from "./lib/rateLimit";
@@ -183,7 +185,7 @@ app.route("/teacher", teacherRoutes);
 app.route("/admin", adminRoutes);
 app.route("/", studentRoutes);
 
-// External dummy API backed by DB_external_dummy.
+// External dummy API backed by DB_lunar_attendance.
 app.post("/external/dev/setup", async (c) => {
   if (!externalApiAuthorized(c)) return c.json({ error: "Unauthorized" }, 401);
   const setupLimit = await requireRateLimit(
@@ -209,7 +211,10 @@ app.post("/external/student/access/claim", async (c) => {
   if (!reasonableText(token, 200))
     return c.json({ ok: false, error: "Missing access QR token" }, 400);
 
-  const result = await claimStudentAccessGrant(c.env.DB_external_dummy, token);
+  const result = await claimStudentAccessGrant(
+    c.env.DB_lunar_attendance,
+    token,
+  );
   if (!result.ok) return c.json(result, 400);
 
   return c.json({
@@ -250,7 +255,7 @@ app.post("/external/attendance/mark", async (c) => {
   }
 
   const student = await verifyStudentAccessForClass(
-    c.env.DB_external_dummy,
+    c.env.DB_lunar_attendance,
     accessToken,
     classId,
   );
@@ -258,7 +263,7 @@ app.post("/external/attendance/mark", async (c) => {
     return c.json({ message: "Student is not enrolled in this class" }, 401);
   }
 
-  const result = await markExternalAttendance(c.env.DB_external_dummy, {
+  const result = await markExternalAttendance(c.env.DB_lunar_attendance, {
     sessionId,
     classId,
     studentId: student.studentId,
@@ -267,7 +272,7 @@ app.post("/external/attendance/mark", async (c) => {
     metadata: requestScanMetadata(c.req.raw, metadata),
   });
   const rotated = await rotateStudentAccessToken(
-    c.env.DB_external_dummy,
+    c.env.DB_lunar_attendance,
     accessToken,
     student.studentId,
   );
@@ -286,7 +291,7 @@ app.post("/external/attendance/mark", async (c) => {
 // Forward WebSocket upgrade to DO
 app.get("/api/sessions/:id/ws", async (c) => {
   const teacher = await getTeacherBySessionToken(
-    c.env.DB_external_dummy,
+    c.env.DB_lunar_attendance,
     getCookie(c, TEACHER_SESSION_COOKIE),
   );
   if (!teacher) {
@@ -312,8 +317,9 @@ app.get("/api/sessions/:id/ws", async (c) => {
   return stub.fetch(new Request(`https://do-internal/ws`, c.req.raw));
 });
 
-// Student submits attendance — proxied to DO
+// Student submits attendance
 app.post("/api/attend", async (c) => {
+  console.log(requestIp(c.req.raw));
   const attendLimit = await requireRateLimit(
     c.env.KV_lunar_attendance,
     `attend:${requestIp(c.req.raw)}`,
@@ -324,35 +330,132 @@ app.post("/api/attend", async (c) => {
     return c.json({ error: "Too many attendance attempts" }, 429);
   }
 
+  const sessionToken = getCookie(c, STUDENT_SESSION_COOKIE);
+  if (!sessionToken) return c.json({ error: "Session required" }, 401);
+  const student = await getStudentBySessionToken(
+    c.env.DB_lunar_attendance,
+    sessionToken,
+  );
+  if (!student) return c.json({ error: "Invalid session" }, 401);
+
   const body = await c.req.json<{
     sessionId: string;
-    qrToken: string;
-    accessToken: string;
+    checkoutAnyway?: boolean;
     metadata?: AttendanceScanMetadata;
   }>();
-  if (
-    !reasonableText(body.sessionId, 120) ||
-    !reasonableText(body.qrToken, 80) ||
-    !reasonableText(body.accessToken, 240)
-  ) {
-    return c.json({ error: "Missing or invalid attendance token" }, 400);
+
+  if (!reasonableText(body.sessionId, 120)) {
+    return c.json({ error: "Missing session ID" }, 400);
   }
+
+  const session = await c.env.DB_lunar_attendance.prepare(
+    `SELECT class_id, teacher_id, ip_address, status FROM sessions WHERE id = ? LIMIT 1`,
+  )
+    .bind(body.sessionId)
+    .first<{
+      class_id: string;
+      teacher_id: string;
+      ip_address: string;
+      status: string;
+    }>();
+
+  if (!session || session.status !== "active") {
+    return c.json({ error: "Invalid or inactive session" }, 400);
+  }
+
+  // IP verification
+  const studentIp = requestIp(c.req.raw);
+  if (
+    session.ip_address &&
+    session.ip_address !== studentIp &&
+    session.ip_address !== "unknown" &&
+    studentIp !== "unknown"
+  ) {
+    // Basic IP match check. In local dev, IPs might be unknown.
+    return c.json({ error: "Please connect to the class Wi-Fi network" }, 403);
+  }
+
+  // Check enrollment
+  const isEnrolled = await c.env.DB_lunar_attendance.prepare(
+    `SELECT 1 FROM student_classes WHERE student_id = ? AND class_id = ?`,
+  )
+    .bind(student.id, session.class_id)
+    .first();
+
+  if (!isEnrolled) {
+    return c.json({ error: "Not enrolled in this class" }, 403);
+  }
+
+  await touchStudentSession(c.env.DB_lunar_attendance, sessionToken);
+
+  const attendanceDay = localDateKey();
+  const existingRecord = await c.env.DB_lunar_attendance.prepare(
+    `SELECT id, attended_at, checked_out_at FROM attendance_records WHERE class_id = ? AND student_id = ? AND attendance_day = ? LIMIT 1`,
+  )
+    .bind(session.class_id, student.id, attendanceDay)
+    .first<{
+      id: string;
+      attended_at: number;
+      checked_out_at: number | null;
+    }>();
+
+  let alreadyMarked = false;
+  let checkedOut = false;
+
+  if (existingRecord) {
+    const hoursSinceMark =
+      (Math.floor(Date.now() / 1000) - existingRecord.attended_at) / 3600;
+    if (existingRecord.checked_out_at) {
+      alreadyMarked = true;
+      checkedOut = true;
+    } else if (hoursSinceMark < 2 && !body.checkoutAnyway) {
+      const minutesSpent = Math.floor(hoursSinceMark * 60);
+      return c.json({
+        warning: `You have spent ${minutesSpent} minutes in class. Do you want to check out?`,
+      });
+    } else if (body.checkoutAnyway || hoursSinceMark >= 2) {
+      await c.env.DB_lunar_attendance.prepare(
+        `UPDATE attendance_records SET checked_out_at = ? WHERE id = ?`,
+      )
+        .bind(Math.floor(Date.now() / 1000), existingRecord.id)
+        .run();
+      checkedOut = true;
+    } else {
+      alreadyMarked = true;
+    }
+  } else {
+    await markExternalAttendance(c.env.DB_lunar_attendance, {
+      sessionId: body.sessionId,
+      classId: session.class_id,
+      studentId: student.id,
+      studentName: student.name,
+      attendanceDay,
+      metadata: requestScanMetadata(c.req.raw, body.metadata),
+    });
+  }
+
   const doId = c.env.durable_objects_lunar_attendance.idFromName(
     body.sessionId,
   );
   const stub = c.env.durable_objects_lunar_attendance.get(doId);
-  const res = await stub.fetch(
-    new Request("https://do-internal/attend", {
+  await stub.fetch(
+    new Request("https://do-internal/attend-broadcast", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        qrToken: body.qrToken,
-        accessToken: body.accessToken,
-        metadata: requestScanMetadata(c.req.raw, body.metadata),
+        studentName: student.name,
+        alreadyMarked,
+        checkedOut,
       }),
     }),
   );
-  return res;
+
+  return c.json({
+    ok: true,
+    alreadyMarked,
+    checkedOut,
+    studentName: student.name,
+  });
 });
 
 // Create session (teacher)
@@ -368,7 +471,7 @@ app.post("/api/sessions", async (c) => {
   }
 
   const teacher = await getTeacherBySessionToken(
-    c.env.DB_external_dummy,
+    c.env.DB_lunar_attendance,
     getCookie(c, TEACHER_SESSION_COOKIE),
   );
   if (!teacher) {
@@ -376,7 +479,7 @@ app.post("/api/sessions", async (c) => {
   }
   const teacherSessionToken = getCookie(c, TEACHER_SESSION_COOKIE);
   const pinVerified = await isTeacherPinRecentlyVerified(
-    c.env.DB_external_dummy,
+    c.env.DB_lunar_attendance,
     teacherSessionToken,
   );
   if (!pinVerified) {
@@ -391,7 +494,7 @@ app.post("/api/sessions", async (c) => {
   }
 
   const allowed = await teacherCanAccessClass(
-    c.env.DB_external_dummy,
+    c.env.DB_lunar_attendance,
     teacher.id,
     classId,
   );
@@ -399,6 +502,7 @@ app.post("/api/sessions", async (c) => {
     return c.json({ error: "Teacher is not assigned to this class" }, 403);
   }
 
+  const teacherIp = requestIp(c.req.raw);
   let sessionId: string;
   const existing = await c.env.DB_lunar_attendance.prepare(
     `SELECT id
@@ -415,12 +519,17 @@ app.post("/api/sessions", async (c) => {
 
   if (existing) {
     sessionId = existing.id;
+    await c.env.DB_lunar_attendance.prepare(
+      `UPDATE sessions SET ip_address = ? WHERE id = ?`,
+    )
+      .bind(teacherIp, sessionId)
+      .run();
   } else {
     sessionId = crypto.randomUUID();
     await c.env.DB_lunar_attendance.prepare(
-      `INSERT INTO sessions (id, class_id, teacher_id) VALUES (?, ?, ?)`,
+      `INSERT INTO sessions (id, class_id, teacher_id, ip_address) VALUES (?, ?, ?, ?)`,
     )
-      .bind(sessionId, classId, teacher.id)
+      .bind(sessionId, classId, teacher.id, teacherIp)
       .run();
   }
 

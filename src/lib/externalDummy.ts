@@ -7,6 +7,7 @@ export interface ExternalTeacher {
   id: string;
   name: string;
   email: string;
+  role: string;
 }
 
 export interface ExternalClass {
@@ -130,7 +131,7 @@ export async function findTeacherByCredentials(
   //
   return db
     .prepare(
-      `SELECT id, name, email
+      `SELECT id, name, email, role
          FROM teachers
         WHERE lower(email) = lower(?)
           AND pin = ?
@@ -233,7 +234,7 @@ export async function getTeacherBySessionToken(
 
   return db
     .prepare(
-      `SELECT t.id, t.name, t.email
+      `SELECT t.id, t.name, t.email, t.role
          FROM teacher_sessions ts
          JOIN teachers t ON t.id = ts.teacher_id
         WHERE ts.token = ?
@@ -942,4 +943,39 @@ export async function getAdminStats(db: D1Database) {
     classes: classes?.count ?? 0,
     attendance: records?.count ?? 0,
   };
+}
+
+export async function createStudentSession(db: D1Database, studentId: string) {
+  const sessionId = crypto.randomUUID();
+  const expiresAt = Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60; // 7 days
+  await db.prepare(`INSERT INTO student_sessions (id, student_id, expires_at) VALUES (?, ?, ?)`)
+    .bind(sessionId, studentId, expiresAt)
+    .run();
+  return { sessionId, expiresAt };
+}
+
+export async function getStudentBySessionToken(db: D1Database, sessionId: string) {
+  if (!sessionId) return null;
+  const now = Math.floor(Date.now() / 1000);
+  return db.prepare(`
+    SELECT s.id, s.name, s.email, ss.expires_at AS expiresAt
+    FROM student_sessions ss
+    JOIN students s ON s.id = ss.student_id
+    WHERE ss.id = ? AND ss.expires_at > ?
+  `).bind(sessionId, now).first<ExternalStudent & { expiresAt: number }>();
+}
+
+export async function touchStudentSession(db: D1Database, sessionId: string) {
+  const expiresAt = Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60;
+  await db.prepare(`UPDATE student_sessions SET expires_at = ? WHERE id = ?`)
+    .bind(expiresAt, sessionId)
+    .run();
+}
+
+export async function createStudentWithContact(db: D1Database, name: string, email: string, contactNumber: string, secondaryContactNumber: string) {
+  const id = `student_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+  await db.prepare(`INSERT INTO students (id, name, email, contact_number, secondary_contact_number) VALUES (?, ?, ?, ?, ?)`)
+    .bind(id, name.trim(), email.trim().toLowerCase(), contactNumber.trim(), secondaryContactNumber.trim())
+    .run();
+  return { id };
 }
