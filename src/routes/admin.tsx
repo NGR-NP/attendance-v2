@@ -36,6 +36,7 @@ import { Layout } from "../components/Layout";
 import { requestIp } from "../lib/rateLimit";
 import {
   deleteAllowedWifiIp,
+  getWifiAccessDecision,
   listAllowedWifiIps,
   normalizeIpAddress,
   saveAllowedWifiIp,
@@ -1017,6 +1018,8 @@ adminRoutes.get("/wifi", async (c) => {
   const currentIp = requestIp(c.req.raw);
   const normalizedCurrentIp = normalizeIpAddress(currentIp);
   const invalidIp = c.req.query("error") === "invalid-ip";
+  const testIp = c.req.query("testIp");
+  const testResult = c.req.query("testResult");
 
   return layout(
     c,
@@ -1062,6 +1065,31 @@ adminRoutes.get("/wifi", async (c) => {
           <IconPlus /> Add IP
         </button>
       </form>
+
+      <form class="inline-form" method="post" action="/admin/wifi/test">
+        <div class="field">
+          <label>Test an IP against the allowlist</label>
+          <input
+            name="testIp"
+            placeholder="203.0.113.10"
+            value={String(testIp ?? "")}
+            required
+          />
+        </div>
+        <button type="submit" class="btn btn-secondary">
+          Test IP
+        </button>
+      </form>
+
+      {testResult && (
+        <div class="empty-state" style="margin-top: 1rem;">
+          {testResult === "allowed" ? (
+            <span style="color: var(--success);">This IP is allowed.</span>
+          ) : (
+            <span style="color: var(--danger);">This IP is not allowed.</span>
+          )}
+        </div>
+      )}
 
       {wifiIps.length === 0 ? (
         <div class="empty-state" style="margin-top: 2rem;">
@@ -1141,6 +1169,18 @@ adminRoutes.post("/wifi", async (c) => {
   }
 
   return c.redirect("/admin/wifi");
+});
+
+adminRoutes.post("/wifi/test", async (c) => {
+  const body = await c.req.parseBody();
+  const testIp = boundedText(body.testIp, 80);
+  const result = await getWifiAccessDecision(
+    c.env.DB_lunar_attendance,
+    testIp,
+  );
+
+  const testResult = result.configured && result.allowed ? "allowed" : "blocked";
+  return c.redirect(`/admin/wifi?testIp=${encodeURIComponent(testIp)}&testResult=${testResult}`);
 });
 
 adminRoutes.post("/wifi/:id/enable", async (c) => {
