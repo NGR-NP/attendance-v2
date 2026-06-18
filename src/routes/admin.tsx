@@ -1234,6 +1234,8 @@ adminRoutes.get("/attendance", async (c) => {
               <th>Time</th>
               <th>Student</th>
               <th>Class</th>
+              <th>Check-out</th>
+              <th>Duration</th>
               <th>Device</th>
               <th>Country</th>
               <th style="text-align: right;">Actions</th>
@@ -1258,6 +1260,13 @@ adminRoutes.get("/attendance", async (c) => {
                   >
                     {r.classCode}
                   </a>
+                  <div class="text-muted text-sm">{r.className}</div>
+                </td>
+                <td>
+                  <span class="text-sm">{r.checkoutTime ?? "—"}</span>
+                </td>
+                <td>
+                  <span class="text-sm">{r.duration ?? "—"}</span>
                 </td>
                 <td>
                   <span class="text-sm">{r.deviceType || "Unknown"}</span>
@@ -1283,7 +1292,7 @@ adminRoutes.get("/attendance", async (c) => {
             ))}
             {records.length === 0 && (
               <tr>
-                <td colspan={6}>
+                <td colspan={8}>
                   <div class="empty-state">
                     No attendance records found yet.
                   </div>
@@ -1307,6 +1316,8 @@ adminRoutes.get("/attendance/export", async (c) => {
   const headers = [
     "Date",
     "Time",
+    "Checkout Time",
+    "Duration",
     "Student Name",
     "Student ID",
     "Class Code",
@@ -1318,6 +1329,8 @@ adminRoutes.get("/attendance/export", async (c) => {
   const rows = records.map((r) => [
     r.day,
     r.time,
+    r.checkoutTime || "",
+    r.duration || "",
     `"${r.studentName.replace(/"/g, '""')}"`,
     r.studentId,
     r.classCode,

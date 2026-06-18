@@ -43,7 +43,12 @@ export interface ExternalStudentAttendanceSummary {
 export interface ExternalStudentAttendanceRecord {
   day: string;
   time: string;
+  checkoutTime: string | null;
+  duration: string | null;
   sessionId: string;
+  classId: string;
+  classCode: string;
+  className: string;
   requesterIp: string | null;
   userAgent: string | null;
   deviceType: string | null;
@@ -69,6 +74,17 @@ let schemaEnsured = false;
 
 function nowSeconds() {
   return Math.floor(Date.now() / 1000);
+}
+
+function formatDuration(seconds: number | null) {
+  if (!seconds || seconds <= 0) return null;
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  if (hours > 0) {
+    return `${hours}h ${remainingMinutes}m`;
+  }
+  return `${minutes}m`;
 }
 
 function randomToken(prefix: string) {
@@ -648,7 +664,10 @@ export async function listStudentAttendanceRecords(
     .prepare(
       `SELECT attendance_day AS day,
               time(attended_at, 'unixepoch', '+5 hours', '+45 minutes') AS time,
+              CASE WHEN checked_out_at IS NOT NULL THEN time(checked_out_at, 'unixepoch', '+5 hours', '+45 minutes') END AS checkoutTime,
+              CASE WHEN checked_out_at IS NOT NULL THEN checked_out_at - attended_at ELSE NULL END AS durationSeconds,
               session_id AS sessionId,
+              class_id AS classId,
               requester_ip AS requesterIp,
               user_agent AS userAgent,
               device_type AS deviceType,
@@ -663,9 +682,29 @@ export async function listStudentAttendanceRecords(
         ORDER BY attended_at DESC`,
     )
     .bind(classId, studentId)
-    .all<ExternalStudentAttendanceRecord>();
+    .all<{
+      day: string;
+      time: string;
+      checkoutTime: string | null;
+      durationSeconds: number | null;
+      sessionId: string;
+      classId: string;
+      requesterIp: string | null;
+      userAgent: string | null;
+      deviceType: string | null;
+      country: string | null;
+      clientTimezone: string | null;
+      clientLanguage: string | null;
+      clientPlatform: string | null;
+      screenSize: string | null;
+    }>();
 
-  return results ?? [];
+  return (results ?? []).map((row) => ({
+    ...row,
+    classCode: "",
+    className: "",
+    duration: formatDuration(row.durationSeconds),
+  }));
 }
 
 export async function listAllTeachers(db: D1Database, search?: string) {
@@ -874,7 +913,9 @@ export async function listAllAttendanceRecords(db: D1Database, limit = 100) {
     .prepare(
       `SELECT r.id, r.student_name AS studentName, r.attendance_day AS day,
               time(r.attended_at, 'unixepoch', '+5 hours', '+45 minutes') AS time,
-              c.code AS classCode, r.class_id AS classId, r.student_id AS studentId,
+              CASE WHEN r.checked_out_at IS NOT NULL THEN time(r.checked_out_at, 'unixepoch', '+5 hours', '+45 minutes') END AS checkoutTime,
+              CASE WHEN r.checked_out_at IS NOT NULL THEN r.checked_out_at - r.attended_at ELSE NULL END AS durationSeconds,
+              c.code AS classCode, c.name AS className, r.class_id AS classId, r.student_id AS studentId,
               r.device_type AS deviceType, r.country
          FROM attendance_records r
          JOIN classes c ON c.id = r.class_id
@@ -887,13 +928,20 @@ export async function listAllAttendanceRecords(db: D1Database, limit = 100) {
       studentName: string;
       day: string;
       time: string;
+      checkoutTime: string | null;
+      durationSeconds: number | null;
       classCode: string;
+      className: string;
       classId: string;
       studentId: string;
       deviceType: string | null;
       country: string | null;
     }>();
-  return results ?? [];
+
+  return (results ?? []).map((row) => ({
+    ...row,
+    duration: formatDuration(row.durationSeconds),
+  }));
 }
 export async function deleteAttendanceRecord(db: D1Database, id: string) {
   await db
@@ -906,7 +954,9 @@ export async function listAllAttendanceRecordsForExport(db: D1Database) {
     .prepare(
       `SELECT r.id, r.student_name AS studentName, r.attendance_day AS day,
               time(r.attended_at, 'unixepoch', '+5 hours', '+45 minutes') AS time,
-              c.code AS classCode, r.student_id AS studentId,
+              CASE WHEN r.checked_out_at IS NOT NULL THEN time(r.checked_out_at, 'unixepoch', '+5 hours', '+45 minutes') END AS checkoutTime,
+              CASE WHEN r.checked_out_at IS NOT NULL THEN r.checked_out_at - r.attended_at ELSE NULL END AS durationSeconds,
+              c.code AS classCode, c.name AS className, r.student_id AS studentId,
               r.requester_ip AS requesterIp, r.user_agent AS userAgent,
               r.device_type AS deviceType, r.country, r.client_timezone AS clientTimezone
          FROM attendance_records r
@@ -918,6 +968,8 @@ export async function listAllAttendanceRecordsForExport(db: D1Database) {
       studentName: string;
       day: string;
       time: string;
+      checkoutTime: string | null;
+      durationSeconds: number | null;
       classCode: string;
       studentId: string;
       requesterIp: string | null;
@@ -926,7 +978,10 @@ export async function listAllAttendanceRecordsForExport(db: D1Database) {
       country: string | null;
       clientTimezone: string | null;
     }>();
-  return results ?? [];
+  return (results ?? []).map((row) => ({
+    ...row,
+    duration: formatDuration(row.durationSeconds),
+  }));
 }
 export async function getAdminStats(db: D1Database) {
   const [teachers, students, classes, records] = await Promise.all([

@@ -976,7 +976,9 @@ teacherRoutes.get(
             <thead>
               <tr>
                 <th>Date</th>
-                <th>Time</th>
+                <th>Check-in</th>
+                <th>Check-out</th>
+                <th>Duration</th>
                 <th>Session</th>
                 <th>Device</th>
                 <th>IP</th>
@@ -988,6 +990,8 @@ teacherRoutes.get(
                   <tr>
                     <td>{row.day}</td>
                     <td>{row.time}</td>
+                    <td>{row.checkoutTime ?? "—"}</td>
+                    <td>{row.duration ?? "—"}</td>
                     <td>{row.sessionId.slice(0, 8)}</td>
                     <td>
                       <div class="cell-title">
@@ -1011,7 +1015,7 @@ teacherRoutes.get(
                 ))
               ) : (
                 <tr>
-                  <td colspan={5}>No attendance recorded for this student.</td>
+                  <td colspan={7}>No attendance recorded for this student.</td>
                 </tr>
               )}
             </tbody>
