@@ -20,11 +20,11 @@ class MockWebSocket {
   close = vi.fn();
 }
 
-// // Set up WebSocketPair global mock
-// globalThis.WebSocketPair = class {
-//   0 = new MockWebSocket();
-//   1 = new MockWebSocket();
-// } as any;
+// Set up WebSocketPair global mock
+(globalThis as typeof globalThis & { WebSocketPair: any }).WebSocketPair = class {
+  0 = new MockWebSocket();
+  1 = new MockWebSocket();
+} as any;
 
 // Mock Response to bypass Node's status 101 RangeError
 const OriginalResponse = globalThis.Response;

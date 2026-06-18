@@ -21,7 +21,7 @@
 	"d1_databases": [
 
 		{
-			"binding": "y",
+			"binding": "DB_lunar_attendance",
 			"database_name": "lunar-attendance",
 			"database_id": "c3366583-f596-43bc-ae78-bbdae820b2f9",
 			"remote": true
@@ -46,7 +46,7 @@
 	"kv_namespaces": [
 
 		{
-			"binding": "KV_lunar_attendance_new",
+			"binding": "KV_lunar_attendance",
 			"id": "3445aa6b8ab34d9497439908218c9601",
 			"remote": true
 		}

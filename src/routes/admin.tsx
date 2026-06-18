@@ -33,9 +33,24 @@ import {
 } from "../lib/externalDummy";
 import { signAdminToken, verifyAdminToken, ADMIN_COOKIE } from "../lib/auth";
 import { Layout } from "../components/Layout";
+import { requestIp } from "../lib/rateLimit";
+import {
+  deleteAllowedWifiIp,
+  listAllowedWifiIps,
+  normalizeIpAddress,
+  saveAllowedWifiIp,
+  setAllowedWifiIpEnabled,
+} from "../lib/wifi";
 
 export const adminRoutes = new Hono<{ Bindings: Env }>();
 type AppContext = Context<{ Bindings: Env }>;
+
+function boundedText(value: unknown, maxLength: number) {
+  return String(value ?? "")
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .trim()
+    .slice(0, maxLength);
+}
 // ── Login page ───────────────────────────────────────────────────────
 function loginPage(c: AppContext, error?: string) {
   return c.html(
@@ -995,6 +1010,162 @@ adminRoutes.post("/classes/:id/unassign", async (c) => {
   );
   return c.redirect(`/admin/classes/${c.req.param("id")}`);
 });
+
+// ── Wi-Fi IP Allowlist ───────────────────────────────────────────────
+adminRoutes.get("/wifi", async (c) => {
+  const wifiIps = await listAllowedWifiIps(c.env.DB_lunar_attendance);
+  const currentIp = requestIp(c.req.raw);
+  const normalizedCurrentIp = normalizeIpAddress(currentIp);
+  const invalidIp = c.req.query("error") === "invalid-ip";
+
+  return layout(
+    c,
+    "Wi-Fi IPs",
+    "wifi",
+    <>
+      <div class="flex-between" style="margin-bottom: 1.5rem;">
+        <div>
+          <h1 style="margin: 0;">Wi-Fi IP Allowlist</h1>
+          <p class="text-muted" style="margin: 0.5rem 0 0;">
+            Attendance scans are accepted from enabled public IP addresses.
+          </p>
+        </div>
+        <div class="badge">
+          Current IP: {normalizedCurrentIp ?? currentIp}
+        </div>
+      </div>
+
+      {invalidIp && (
+        <div
+          class="empty-state"
+          style="margin-bottom: 1rem; background: var(--danger-soft); color: var(--danger);"
+        >
+          Enter a valid IPv4 or IPv6 address.
+        </div>
+      )}
+
+      <form class="inline-form" method="post" action="/admin/wifi">
+        <div class="field">
+          <label>Network Label</label>
+          <input name="label" placeholder="Main campus Wi-Fi" required />
+        </div>
+        <div class="field">
+          <label>Public IP Address</label>
+          <input
+            name="ipAddress"
+            placeholder="203.0.113.10"
+            value={normalizedCurrentIp ?? ""}
+            required
+          />
+        </div>
+        <button type="submit" class="btn btn-primary">
+          <IconPlus /> Add IP
+        </button>
+      </form>
+
+      {wifiIps.length === 0 ? (
+        <div class="empty-state" style="margin-top: 2rem;">
+          No Wi-Fi IPs configured. Attendance will use the teacher session IP
+          until an IP is added here.
+        </div>
+      ) : (
+        <div class="table-container">
+          <table>
+            <thead>
+              <tr>
+                <th>Status</th>
+                <th>Label</th>
+                <th>IP Address</th>
+                <th>Created</th>
+                <th style="text-align: right;">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {wifiIps.map((ip) => (
+                <tr>
+                  <td>
+                    <span class={`badge ${ip.enabled ? "badge-primary" : ""}`}>
+                      {ip.enabled ? "Enabled" : "Disabled"}
+                    </span>
+                  </td>
+                  <td class="font-semibold">{ip.label}</td>
+                  <td>
+                    <span class="badge">{ip.ipAddress}</span>
+                  </td>
+                  <td class="text-muted text-sm">
+                    {new Date(ip.createdAt * 1000).toLocaleString()}
+                  </td>
+                  <td style="text-align: right;">
+                    <div
+                      style="display: flex; gap: 0.5rem; justify-content: flex-end;"
+                    >
+                      <form
+                        method="post"
+                        action={`/admin/wifi/${ip.id}/${ip.enabled ? "disable" : "enable"}`}
+                      >
+                        <button class="btn btn-secondary">
+                          {ip.enabled ? "Disable" : "Enable"}
+                        </button>
+                      </form>
+                      <form
+                        method="post"
+                        action={`/admin/wifi/${ip.id}/delete`}
+                        onsubmit="return confirm('Delete this Wi-Fi IP?')"
+                      >
+                        <button class="btn btn-danger btn-icon" title="Delete">
+                          <IconTrash />
+                        </button>
+                      </form>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </>,
+  );
+});
+
+adminRoutes.post("/wifi", async (c) => {
+  const body = await c.req.parseBody();
+  const result = await saveAllowedWifiIp(
+    c.env.DB_lunar_attendance,
+    boundedText(body.label, 80),
+    boundedText(body.ipAddress, 80),
+  );
+
+  if (!result.ok) {
+    return c.redirect("/admin/wifi?error=invalid-ip");
+  }
+
+  return c.redirect("/admin/wifi");
+});
+
+adminRoutes.post("/wifi/:id/enable", async (c) => {
+  await setAllowedWifiIpEnabled(
+    c.env.DB_lunar_attendance,
+    c.req.param("id"),
+    true,
+  );
+  return c.redirect("/admin/wifi");
+});
+
+adminRoutes.post("/wifi/:id/disable", async (c) => {
+  await setAllowedWifiIpEnabled(
+    c.env.DB_lunar_attendance,
+    c.req.param("id"),
+    false,
+  );
+  return c.redirect("/admin/wifi");
+});
+
+adminRoutes.post("/wifi/:id/delete", async (c) => {
+  await deleteAllowedWifiIp(c.env.DB_lunar_attendance, c.req.param("id"));
+  return c.redirect("/admin/wifi");
+});
+
 // ── Attendance Log ───────────────────────────────────────────────────
 adminRoutes.get("/attendance", async (c) => {
   const records = await listAllAttendanceRecords(c.env.DB_lunar_attendance);
@@ -1292,4 +1463,3 @@ adminRoutes.get("/attendance/today", async (c) => {
     </>,
   );
 });
-

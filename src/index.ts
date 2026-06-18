@@ -22,6 +22,7 @@ import {
 } from "./lib/externalDummy";
 import { localDateKey, SQLITE_LOCALTIME_MODIFIER } from "./lib/date";
 import { rateLimit, requestIp } from "./lib/rateLimit";
+import { getWifiAccessDecision } from "./lib/wifi";
 
 export { AttendanceSession as lunarAttendance } from "./do/AttendanceSession";
 
@@ -367,15 +368,24 @@ app.post("/api/attend", async (c) => {
     return c.json({ error: "Invalid or inactive session" }, 400);
   }
 
-  // IP verification
   const studentIp = requestIp(c.req.raw);
-  if (
+  const wifiDecision = await getWifiAccessDecision(
+    c.env.DB_lunar_attendance,
+    studentIp,
+  );
+  if (wifiDecision.configured) {
+    if (!wifiDecision.allowed) {
+      return c.json(
+        { error: "Please connect to an approved Wi-Fi network" },
+        403,
+      );
+    }
+  } else if (
     session.ip_address &&
     session.ip_address !== studentIp &&
     session.ip_address !== "unknown" &&
     studentIp !== "unknown"
   ) {
-    // Basic IP match check. In local dev, IPs might be unknown.
     return c.json({ error: "Please connect to the class Wi-Fi network" }, 403);
   }
 

@@ -9,6 +9,7 @@ interface LayoutProps {
     | "teachers"
     | "students"
     | "classes"
+    | "wifi"
     | "attendance"
     | "today"
     | string;
@@ -126,6 +127,12 @@ export function Layout({
                   class={`tab ${adminActiveTab === "classes" ? "active" : ""}`}
                 >
                   Classes
+                </a>
+                <a
+                  href="/admin/wifi"
+                  class={`tab ${adminActiveTab === "wifi" ? "active" : ""}`}
+                >
+                  Wi-Fi IPs
                 </a>
                 <a
                   href="/admin/attendance"
