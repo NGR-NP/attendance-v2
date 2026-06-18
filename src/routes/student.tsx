@@ -321,6 +321,15 @@ studentRoutes.get("/attend", async (c) => {
         const msg = document.getElementById('msg');
         const actions = document.getElementById('actions');
 
+        function showMessage(text, type) {
+          if (!msg) return;
+          msg.textContent = text;
+          msg.className = 'status' + (type ? ' ' + type : '');
+          msg.classList.remove('toast');
+          void msg.offsetWidth;
+          msg.classList.add('toast');
+        }
+
         const metadata = {
           clientTimezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
           clientLanguage: navigator.language,
@@ -347,13 +356,11 @@ studentRoutes.get("/attend", async (c) => {
             .then(r => r.json())
             .then(data => {
               if (data.warning) {
-                msg.textContent = data.warning;
-                msg.className = 'status error';
+                showMessage(data.warning, 'error');
                 actions.style.display = 'flex';
                 
                 document.getElementById('btn-stay').onclick = () => {
-                  msg.textContent = 'Attendance preserved. You may close this page.';
-                  msg.className = 'status success';
+                  showMessage('Attendance preserved. You may close this page.', 'success');
                   actions.style.display = 'none';
                 };
                 
@@ -361,26 +368,25 @@ studentRoutes.get("/attend", async (c) => {
                   submitAttendance(classId, true);
                 };
               } else if (data.checkedOut) {
-                msg.textContent = 'Checked out: ' + data.studentName + '. Have a good day!';
-                msg.className = 'status success';
+                showMessage('Checked out: ' + data.studentName + '. Have a good day!', 'success');
                 const selectContainer = document.getElementById('class-selection-container');
                 if (selectContainer) selectContainer.style.display = 'none';
+                actions.style.display = 'none';
               } else if (data.alreadyMarked) {
-                msg.textContent = 'Already marked present today: ' + data.studentName;
-                msg.className = 'status success';
+                showMessage('Already marked present today: ' + data.studentName, 'success');
                 const selectContainer = document.getElementById('class-selection-container');
                 if (selectContainer) selectContainer.style.display = 'none';
+                actions.style.display = 'none';
               } else if (data.ok) {
-                msg.textContent = 'Present: ' + data.studentName + ', your attendance is saved.';
-                msg.className = 'status success';
+                showMessage('Present: ' + data.studentName + ', your attendance is saved.', 'success');
                 const selectContainer = document.getElementById('class-selection-container');
                 if (selectContainer) selectContainer.style.display = 'none';
+                actions.style.display = 'none';
               } else {
-                msg.textContent = data.error ?? 'Something went wrong';
-                msg.className = 'status error';
+                showMessage(data.error ?? 'Something went wrong', 'error');
               }
             })
-            .catch(() => { msg.textContent = 'Network error'; msg.className = 'status error' });
+            .catch(() => { showMessage('Network error', 'error'); });
           }
           
           if (isMainQr) {

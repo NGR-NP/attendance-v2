@@ -1499,6 +1499,8 @@ adminRoutes.get("/attendance/today", async (c) => {
                     </a>
                     <div class="text-muted text-sm">{r.className}</div>
                   </td>
+                  <td>{r.checkoutTime ?? "—"}</td>
+                  <td>{r.duration ?? "—"}</td>
                   <td>
                     <span class="text-sm" style="text-transform: capitalize;">
                       {r.deviceType ?? "unknown"}

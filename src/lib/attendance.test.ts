@@ -100,6 +100,8 @@ const MOCK_RECORD_1 = {
   classCode: "CS101",
   classId: "CS101",
   time: "09:15:00",
+  checkoutTime: null,
+  duration: null,
   deviceType: "mobile",
   country: "NP",
 };
@@ -112,6 +114,8 @@ const MOCK_RECORD_2 = {
   classCode: "MATH201",
   classId: "MATH201",
   time: "09:22:00",
+  checkoutTime: null,
+  duration: null,
   deviceType: "desktop",
   country: "IN",
 };

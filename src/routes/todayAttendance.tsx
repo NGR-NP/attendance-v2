@@ -130,6 +130,8 @@ todayAttendanceRoutes.get("/today", async (c) => {
       '<td><span class="time-badge">' + time + '</span></td>' +
       '<td><div class="cell-name">' + (msg.studentName || '—') + '</div><div class="cell-sub">just now · live</div></td>' +
       '<td><span class="class-tag">' + classCode + '</span><div class="cell-sub">' + className + '</div></td>' +
+      '<td>—</td>' +
+      '<td>—</td>' +
       '<td><span class="device-pill">—</span></td>' +
       '<td>—</td>';
     tbody.insertBefore(tr, tbody.firstChild);
@@ -393,6 +395,8 @@ todayAttendanceRoutes.get("/today", async (c) => {
               <th>Time</th>
               <th>Student</th>
               <th>Class</th>
+              <th>Check-out</th>
+              <th>Duration</th>
               <th>Device</th>
               <th>Country</th>
             </tr>
@@ -401,7 +405,7 @@ todayAttendanceRoutes.get("/today", async (c) => {
             {records.length === 0 ? (
               <tr data-empty-row="true">
                 <td
-                  colspan={5}
+                  colspan={7}
                   style="text-align: center; padding: 4rem 2rem; color: var(--muted); font-weight: 500;"
                 >
                   {role === "teacher"
@@ -434,6 +438,8 @@ todayAttendanceRoutes.get("/today", async (c) => {
                     </a>
                     <div class="cell-sub">{r.className}</div>
                   </td>
+                  <td>{r.checkoutTime ?? "—"}</td>
+                  <td>{r.duration ?? "—"}</td>
                   <td>
                     <span class="device-pill">{r.deviceType ?? "unknown"}</span>
                   </td>

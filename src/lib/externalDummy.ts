@@ -1104,6 +1104,8 @@ export interface TodayAttendanceRecord {
   classId: string;
   /** Local time string e.g. "09:32:15" (NPT +05:45) */
   time: string;
+  checkoutTime: string | null;
+  duration: string | null;
   deviceType: string | null;
   country: string | null;
 }
@@ -1130,6 +1132,8 @@ export async function listAttendanceForDay(
                 c.code           AS classCode,
                 r.class_id       AS classId,
                 time(r.attended_at, 'unixepoch', '+5 hours', '+45 minutes') AS time,
+                CASE WHEN r.checked_out_at IS NOT NULL THEN time(r.checked_out_at, 'unixepoch', '+5 hours', '+45 minutes') END AS checkoutTime,
+                CASE WHEN r.checked_out_at IS NOT NULL THEN r.checked_out_at - r.attended_at ELSE NULL END AS durationSeconds,
                 r.device_type    AS deviceType,
                 r.country
            FROM attendance_records r
@@ -1142,7 +1146,10 @@ export async function listAttendanceForDay(
 
       .bind(day, options.teacherId)
       .all<TodayAttendanceRecord>();
-    return results ?? [];
+    return (results ?? []).map((row) => ({
+      ...row,
+      duration: formatDuration((row as any).durationSeconds ?? null),
+    }));
   }
 
   // Unfiltered path: admin sees all records for the day.
@@ -1155,6 +1162,8 @@ export async function listAttendanceForDay(
               c.code           AS classCode,
               r.class_id       AS classId,
               time(r.attended_at, 'unixepoch', '+5 hours', '+45 minutes') AS time,
+              CASE WHEN r.checked_out_at IS NOT NULL THEN time(r.checked_out_at, 'unixepoch', '+5 hours', '+45 minutes') END AS checkoutTime,
+              CASE WHEN r.checked_out_at IS NOT NULL THEN r.checked_out_at - r.attended_at ELSE NULL END AS durationSeconds,
               r.device_type    AS deviceType,
               r.country
          FROM attendance_records r
@@ -1164,6 +1173,9 @@ export async function listAttendanceForDay(
     )
     .bind(day)
     .all<TodayAttendanceRecord>();
-  return results ?? [];
+  return (results ?? []).map((row) => ({
+    ...row,
+    duration: formatDuration((row as any).durationSeconds ?? null),
+  }));
 }
 

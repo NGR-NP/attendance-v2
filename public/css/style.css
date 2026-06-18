@@ -524,6 +524,29 @@ button, .btn {
 #status.err, #qr-status.err { color: var(--danger); }
 #scan-url, #qr-scan-url { overflow-wrap: anywhere; font-size: 13px; color: #475569; }
 
+.status {
+  margin-top: 20px;
+  padding: 14px 15px;
+  border-radius: 1rem;
+  background: color-mix(in srgb, var(--primary), white 94%);
+  border: 1px solid var(--primary-tint);
+  color: var(--ink);
+  font-size: 18px;
+  font-weight: 800;
+  line-height: 1.4;
+  text-align: center;
+  transition: transform 0.2s ease, box-shadow 0.2s ease, opacity 0.2s ease;
+}
+.status.toast {
+  animation: popToast 0.32s ease;
+}
+.status.success { background: #ecfdf5; border-color: #bbf7d0; color: var(--success); }
+.status.error { background: #fef2f2; border-color: #fecaca; color: var(--danger); }
+@keyframes popToast {
+  from { opacity: 0; transform: translateY(-10px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
 /* Log Lists */
 .log-list { display: grid; gap: 10px; margin-top: 12px; }
 .log-list p {
