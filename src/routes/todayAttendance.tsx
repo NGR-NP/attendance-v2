@@ -34,16 +34,29 @@ todayAttendanceRoutes.get("/today", async (c) => {
 
   if (!role) return c.redirect("/teacher/class");
 
-  // ── 2. Load today's records ────────────────────────────────────────
+  // ── 2. Get date from query or use today ────────────────────────────
+  const selectedDate = c.req.query("date") || localDateKey();
   const today = localDateKey();
+  
+  // Parse the date for navigation
+  const [year, month, day] = selectedDate.split("-").map(Number);
+  const currentDateObj = new Date(year, month - 1, day);
+  const prevDateObj = new Date(currentDateObj);
+  prevDateObj.setDate(prevDateObj.getDate() - 1);
+  const nextDateObj = new Date(currentDateObj);
+  nextDateObj.setDate(nextDateObj.getDate() + 1);
+  
+  const formatDate = (d: Date) => d.toISOString().split("T")[0];
+  const prevDate = formatDate(prevDateObj);
+  const nextDate = formatDate(nextDateObj);
+
+  // ── 3. Load records for selected date ──────────────────────────────
   const records = await listAttendanceForDay(
     c.env.DB_lunar_attendance,
-    today,
+    selectedDate,
     role === "teacher" ? { teacherId } : undefined,
   );
 
-  const uniqueStudents = new Set(records.map((r) => r.studentId)).size;
-  const uniqueClasses = new Set(records.map((r) => r.classId)).size;
   const totalCount = records.length;
 
   // ── 3. Build client scripts ────────────────────────────────────────
@@ -230,28 +243,72 @@ todayAttendanceRoutes.get("/today", async (c) => {
   return c.html(
     <Layout
       role={role}
-      title={`Today's Attendance – ${today}`}
+      title={`Attendance – ${selectedDate}`}
       adminActiveTab={role === "admin" ? "today" : undefined}
       teacherActiveTab={role === "teacher" ? "today" : undefined}
       userName={viewerName}
-      qrScript={role === "teacher"}
+      qrScript={role === "teacher" && selectedDate === today}
     >
-      {/* ── Page heading ── */}
+      {/* ── Page heading with date navigation ── */}
       <div class="page-head">
         <div>
-          <div class="eyebrow">Live feed</div>
-          <h1>Today's Attendance</h1>
+          <div class="eyebrow">Attendance history</div>
+          <h1>Attendance Records</h1>
           <p class="subtitle">
             {role === "teacher"
-              ? "Click Start to activate a Global QR session — students scan to mark attendance for your classes."
-              : "All check-ins recorded today across every class."}
+              ? selectedDate === today
+                ? "Click Start to activate a Global QR session — students scan to mark attendance for your classes."
+                : "View your past attendance records for this date."
+              : selectedDate === today
+              ? "All check-ins recorded today across every class."
+              : "View attendance records for this date across every class."}
           </p>
         </div>
-        <span class="date-badge">{today}</span>
       </div>
 
-      {/* ── TEACHER: Start button (shown before session starts) ── */}
-      {role === "teacher" && (
+      {/* ── Date Navigation ── */}
+      <div
+        style="
+          display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+          margin-bottom: 2rem; padding: 1rem 1.5rem;
+          background: var(--surface); border-radius: var(--rounded-lg);
+          border: 1px solid var(--line);
+        "
+      >
+        <a
+          href={`/attendance/today?date=${prevDate}`}
+          class="button secondary"
+          style="flex: 0 0 auto;"
+        >
+          ← Previous day
+        </a>
+        <div style="text-align: center; flex: 1;">
+          <input
+            type="date"
+            value={selectedDate}
+            onchange="window.location.href = '/attendance/today?date=' + this.value"
+            style="
+              padding: 0.5rem 1rem; border: 1px solid var(--line);
+              border-radius: var(--rounded-md); font-size: 1rem;
+              font-family: inherit; cursor: pointer; background: var(--bg);
+              color: var(--ink);
+            "
+          />
+          {selectedDate === today && (
+            <span style="display: block; font-size: 0.75rem; color: var(--muted); margin-top: 0.5rem;">Today</span>
+          )}
+        </div>
+        <a
+          href={`/attendance/today?date=${nextDate}`}
+          class="button secondary"
+          style="flex: 0 0 auto;"
+        >
+          Next day →
+        </a>
+      </div>
+
+      {/* ── TEACHER: Start button (shown only for today's date) ── */}
+      {role === "teacher" && selectedDate === today && (
         <div
           id="qr-start-btn"
           style="
@@ -274,8 +331,8 @@ todayAttendanceRoutes.get("/today", async (c) => {
         </div>
       )}
 
-      {/* ── TEACHER: Live QR panel (hidden until session starts) ── */}
-      {role === "teacher" && (
+      {/* ── TEACHER: Live QR panel (hidden until session starts, only on today's view) ── */}
+      {role === "teacher" && selectedDate === today && (
         <div id="live-panel" class="live-panel" style="display: none;">
           {/* Left: QR code */}
           <div>
@@ -349,25 +406,9 @@ todayAttendanceRoutes.get("/today", async (c) => {
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
           </svg>
-          QR sessions are started by teachers. This view shows all check-ins for today across every class.
+          QR sessions are started by teachers. Use the date navigation to view attendance records for any date.
         </div>
       )}
-
-      {/* ── Stats ── */}
-      <div class="stats-row">
-        <div class="stat-card">
-          <div class="stat-label">Total Check-ins</div>
-          <div class="stat-value" id="stat-total">{totalCount}</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">Unique Students</div>
-          <div class="stat-value">{uniqueStudents}</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">Active Classes</div>
-          <div class="stat-value">{uniqueClasses}</div>
-        </div>
-      </div>
 
       {/* ── Search bar ── */}
       <div class="search-bar">
@@ -408,9 +449,9 @@ todayAttendanceRoutes.get("/today", async (c) => {
                   colspan={7}
                   style="text-align: center; padding: 4rem 2rem; color: var(--muted); font-weight: 500;"
                 >
-                  {role === "teacher"
+                  {selectedDate === today && role === "teacher"
                     ? "No check-ins yet — start a QR session above to begin."
-                    : "No attendance recorded yet today."}
+                    : "No attendance recorded for this date."}
                 </td>
               </tr>
             ) : (
