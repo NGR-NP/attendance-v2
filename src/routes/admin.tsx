@@ -1,6 +1,9 @@
+/** @jsxImportSource hono/jsx */
 import { Hono } from "hono";
 import type { Context } from "hono";
+import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import { Env } from "../types";
+import { localDateKey } from "../lib/date";
 import {
   assignTeacherToClass,
   createClass,
@@ -26,52 +29,13 @@ import {
   listClassAttendanceDays,
   listStudentAttendanceSummaries,
   getAdminStats,
+  listAttendanceForDay,
 } from "../lib/externalDummy";
+import { signAdminToken, verifyAdminToken, ADMIN_COOKIE } from "../lib/auth";
+import { Layout } from "../components/Layout";
+
 export const adminRoutes = new Hono<{ Bindings: Env }>();
 type AppContext = Context<{ Bindings: Env }>;
-// ── Auth helpers ─────────────────────────────────────────────────────
-const COOKIE_NAME = "admin_session";
-async function signToken(secret: string): Promise<string> {
-  const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    "raw",
-    encoder.encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const payload = "admin:authenticated";
-  const sig = await crypto.subtle.sign("HMAC", key, encoder.encode(payload));
-  const hex = [...new Uint8Array(sig)]
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-  return `${payload}.${hex}`;
-}
-async function verifyToken(token: string, secret: string): Promise<boolean> {
-  try {
-    const [payload, hex] = token.split(".");
-    if (!payload || !hex) return false;
-    const encoder = new TextEncoder();
-    const key = await crypto.subtle.importKey(
-      "raw",
-      encoder.encode(secret),
-      { name: "HMAC", hash: "SHA-256" },
-      false,
-      ["verify"],
-    );
-    const sigBytes = new Uint8Array(
-      hex.match(/.{2}/g)!.map((b) => parseInt(b, 16)),
-    );
-    return crypto.subtle.verify("HMAC", key, sigBytes, encoder.encode(payload));
-  } catch {
-    return false;
-  }
-}
-function getCookie(c: AppContext, name: string): string | undefined {
-  const header = c.req.header("Cookie") ?? "";
-  const match = header.match(new RegExp(`(?:^|;\\s*)${name}=([^;]*)`));
-  return match ? decodeURIComponent(match[1]) : undefined;
-}
 // ── Login page ───────────────────────────────────────────────────────
 function loginPage(c: AppContext, error?: string) {
   return c.html(
@@ -140,8 +104,8 @@ function loginPage(c: AppContext, error?: string) {
 }
 adminRoutes.get("/login", async (c) => {
   // If already authenticated, redirect to dashboard
-  const token = getCookie(c, COOKIE_NAME);
-  if (token && (await verifyToken(token, c.env.ADMIN_SECRET))) {
+  const token = getCookie(c, ADMIN_COOKIE);
+  if (token && (await verifyAdminToken(token, c.env.ADMIN_SECRET))) {
     return c.redirect("/admin");
   }
   return loginPage(c);
@@ -151,210 +115,30 @@ adminRoutes.post("/login", async (c) => {
   if (secret !== c.env.ADMIN_SECRET) {
     return loginPage(c, "Invalid secret. Please try again.");
   }
-  const token = await signToken(c.env.ADMIN_SECRET);
-  return new Response(null, {
-    status: 302,
-    headers: {
-      Location: "/admin",
-      "Set-Cookie": `${COOKIE_NAME}=${encodeURIComponent(token)}; Path=/admin; HttpOnly; SameSite=Lax; Max-Age=86400`,
-    },
+  const token = await signAdminToken(c.env.ADMIN_SECRET);
+  setCookie(c, ADMIN_COOKIE, token, {
+    path: "/admin",
+    httpOnly: true,
+    sameSite: "Lax",
+    maxAge: 86400,
   });
+  return c.redirect("/admin");
 });
 adminRoutes.get("/logout", async (c) => {
-  return new Response(null, {
-    status: 302,
-    headers: {
-      Location: "/admin/login",
-      "Set-Cookie": `${COOKIE_NAME}=; Path=/admin; HttpOnly; SameSite=Lax; Max-Age=0`,
-    },
-  });
+  deleteCookie(c, ADMIN_COOKIE, { path: "/admin" });
+  return c.redirect("/admin/login");
 });
 // ── Auth middleware (protects all routes below) ──────────────────────
 adminRoutes.use("*", async (c, next) => {
   const path = new URL(c.req.url).pathname;
   if (path === "/admin/login") return next();
-  const token = getCookie(c, COOKIE_NAME);
-  if (!token || !(await verifyToken(token, c.env.ADMIN_SECRET))) {
+  const token = getCookie(c, ADMIN_COOKIE);
+  if (!token || !(await verifyAdminToken(token, c.env.ADMIN_SECRET))) {
     return c.redirect("/admin/login");
   }
   await next();
 });
-const adminStyles = `
-  @import url("https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800;900&display=swap");
-  :root {
-    color-scheme: light;
-    --font-sans: "Plus Jakarta Sans", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    --primary: #d97706; /* Richer Amber */
-    --primary-soft: #fef3c7;
-    --primary-hover: #b45309;
-    --ink: #0f172a;
-    --ink-light: #334155;
-    --muted: #64748b;
-    --bg: #f8fafc;
-    --surface: #ffffff;
-    --line: #e2e8f0;
-    --success: #10b981;
-    --danger: #ef4444;
-    --danger-soft: #fee2e2;
-    --danger-hover: #dc2626;
-    --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
-    --shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
-    --shadow-md: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
-    --rounded-lg: 0.75rem;
-    --rounded-xl: 1rem;
-    --rounded-2xl: 1.5rem;
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0;
-    min-height: 100vh;
-    font-family: var(--font-sans);
-    background: var(--bg);
-    color: var(--ink);
-    -webkit-font-smoothing: antialiased;
-  }
-  /* Header & Navigation */
-  .topbar {
-    position: sticky; top: 0; z-index: 50;
-    background: rgba(255, 255, 255, 0.7);
-    backdrop-filter: blur(16px);
-    border-bottom: 1px solid rgba(226, 232, 240, 0.8);
-    padding: 1rem 2rem;
-  }
-  .topbar-inner { max-width: 1200px; margin: 0 auto; display: flex; align-items: center; justify-content: space-between; }
-  .brand { 
-    font-weight: 800; font-size: 1.25rem; color: var(--ink); text-decoration: none; 
-    display: flex; align-items: center; gap: 0.5rem; letter-spacing: -0.02em;
-  }
-  .brand-accent { color: var(--primary); }
-  .tabs {
-    background: rgba(255, 255, 255, 0.9); backdrop-filter: blur(12px);
-    border-bottom: 1px solid var(--line);
-    position: sticky; top: 61px; z-index: 40;
-  }
-  .tabs-inner { max-width: 1200px; margin: 0 auto; display: flex; gap: 2.5rem; padding: 0 2rem; }
-  .tab {
-    padding: 1.25rem 0; color: var(--muted); font-weight: 600; text-decoration: none; font-size: 0.95rem;
-    border-bottom: 2px solid transparent; transition: all 0.2s ease; position: relative;
-  }
-  .tab:hover { color: var(--ink); }
-  .tab.active { color: var(--primary); }
-  .tab.active::after {
-    content: ''; position: absolute; bottom: -1px; left: 0; right: 0; height: 2px;
-    background: var(--primary); border-radius: 2px 2px 0 0;
-  }
-  .main { max-width: 1200px; margin: 3rem auto; padding: 0 2rem 5rem; }
-  
-  /* Cards */
-  .card {
-    background: var(--surface); border-radius: var(--rounded-xl); padding: 2rem;
-    box-shadow: var(--shadow-sm); border: 1px solid var(--line); margin-bottom: 2rem;
-    transition: box-shadow 0.3s ease, transform 0.3s ease;
-  }
-  .card-interactive:hover {
-    box-shadow: var(--shadow-md); transform: translateY(-2px); border-color: #cbd5e1;
-  }
-  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 1.5rem; }
-  /* Typography */
-  h1 { font-size: 2rem; font-weight: 800; letter-spacing: -0.02em; margin: 0 0 2rem 0; color: var(--ink); }
-  h2 { font-size: 1.25rem; font-weight: 700; letter-spacing: -0.01em; margin: 0 0 1rem 0; color: var(--ink); }
-  
-  .text-muted { color: var(--muted); }
-  .text-sm { font-size: 0.875rem; }
-  .font-semibold { font-weight: 600; }
-  /* Forms */
-  .inline-form { 
-    display: flex; gap: 1rem; align-items: flex-end; margin-bottom: 2rem; flex-wrap: wrap; 
-    background: #fdfdfd; padding: 1.5rem; border-radius: var(--rounded-xl); border: 1px solid var(--line);
-    box-shadow: var(--shadow-sm);
-  }
-  .field { display: flex; flex-direction: column; gap: 0.5rem; flex: 1; min-width: 200px; }
-  .field label { font-size: 0.8rem; font-weight: 700; color: var(--ink-light); text-transform: uppercase; letter-spacing: 0.05em; }
-  input {
-    padding: 0.75rem 1rem; border: 1px solid var(--line); border-radius: var(--rounded-lg);
-    font-family: inherit; font-size: 0.95rem; outline: none; transition: all 0.2s ease;
-    background: var(--bg); color: var(--ink);
-  }
-  input:hover { border-color: #cbd5e1; }
-  input:focus { border-color: var(--primary); background: white; box-shadow: 0 0 0 3px var(--primary-soft); }
-  /* Buttons */
-  button, .btn {
-    padding: 0.75rem 1.5rem; border-radius: var(--rounded-lg); font-weight: 600; font-size: 0.9rem;
-    cursor: pointer; border: 1px solid transparent; transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); font-family: inherit;
-    display: inline-flex; align-items: center; justify-content: center; text-decoration: none; gap: 0.5rem;
-  }
-  .btn-primary { background: var(--primary); color: white; box-shadow: 0 2px 4px rgba(217, 119, 6, 0.2); }
-  .btn-primary:hover { background: var(--primary-hover); transform: translateY(-1px); box-shadow: 0 4px 6px rgba(217, 119, 6, 0.3); }
-  .btn-primary:active { transform: translateY(0); }
-  
-  .btn-secondary { background: var(--bg); border: 1px solid var(--line); color: var(--ink); }
-  .btn-secondary:hover { background: #f1f5f9; border-color: #cbd5e1; }
-  
-  .btn-danger { background: var(--surface); border: 1px solid var(--danger-soft); color: var(--danger); }
-  .btn-danger:hover { background: var(--danger-soft); border-color: #fca5a5; }
-  .btn-ghost { color: var(--muted); background: transparent; }
-  .btn-ghost:hover { background: var(--bg); color: var(--ink); }
-  
-  .btn-icon { padding: 0.6rem; border-radius: 0.5rem; line-height: 0; }
-  /* Tables */
-  .table-container {
-    background: white; border-radius: var(--rounded-xl); border: 1px solid var(--line);
-    overflow: hidden; box-shadow: var(--shadow-sm); margin-bottom: 2rem;
-  }
-  table { width: 100%; border-collapse: collapse; text-align: left; }
-  th { 
-    font-size: 0.75rem; font-weight: 700; color: var(--muted); text-transform: uppercase; 
-    padding: 1rem 1.5rem; border-bottom: 1px solid var(--line); background: #f8fafc; letter-spacing: 0.05em;
-  }
-  td { padding: 1rem 1.5rem; border-bottom: 1px solid var(--line); font-size: 0.95rem; vertical-align: middle; }
-  tr:last-child td { border-bottom: 0; }
-  tbody tr { transition: background-color 0.2s; }
-  tbody tr:hover { background-color: #f1f5f9; }
-  /* Badges */
-  .badge { 
-    padding: 0.25rem 0.75rem; border-radius: 99px; font-size: 0.75rem; font-weight: 700; 
-    background: var(--bg); color: var(--ink-light); border: 1px solid var(--line); display: inline-block;
-  }
-  .badge-primary { background: var(--primary-soft); color: var(--primary-hover); border-color: transparent; }
-  /* Lists */
-  .class-split { display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; }
-  @media (max-width: 900px) { .class-split { grid-template-columns: 1fr; } }
-  .scroll-box { max-height: 450px; overflow-y: auto; margin: -1rem; padding: 1rem; }
-  /* Custom Scrollbar for scroll-box */
-  .scroll-box::-webkit-scrollbar { width: 6px; }
-  .scroll-box::-webkit-scrollbar-track { background: transparent; }
-  .scroll-box::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
-  .scroll-box::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
-  .list-item { 
-    display: flex; align-items: center; justify-content: space-between; 
-    padding: 1rem; border-radius: var(--rounded-lg); border: 1px solid var(--line);
-    margin-bottom: 0.5rem; background: white; transition: all 0.2s ease;
-  }
-  .list-item:hover { border-color: #cbd5e1; box-shadow: var(--shadow-sm); }
-  .list-item:last-child { margin-bottom: 0; }
-  .item-info { display: flex; flex-direction: column; gap: 0.25rem; }
-  .item-name { font-weight: 600; font-size: 0.95rem; color: var(--ink); }
-  .item-email { font-size: 0.85rem; color: var(--muted); }
-  
-  /* Stat Cards */
-  .stat-card {
-    background: white; border-radius: var(--rounded-xl); padding: 2rem;
-    border: 1px solid var(--line); display: flex; flex-direction: column;
-    position: relative; overflow: hidden; box-shadow: var(--shadow-sm);
-  }
-  .stat-card::before {
-    content: ''; position: absolute; top: 0; left: 0; right: 0; height: 4px;
-    background: linear-gradient(90deg, var(--primary), #fcd34d);
-    opacity: 0.8;
-  }
-  .stat-label { font-size: 0.85rem; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.5rem; }
-  .stat-value { font-size: 3.5rem; font-weight: 800; color: var(--ink); line-height: 1; letter-spacing: -0.02em; margin-bottom: 1.5rem; }
-  
-  /* Utilities */
-  .flex-between { display: flex; justify-content: space-between; align-items: center; }
-  .gap-2 { gap: 0.5rem; display: flex; align-items: center; }
-  .empty-state { text-align: center; padding: 4rem 2rem; color: var(--muted); background: var(--bg); border-radius: var(--rounded-lg); border: 1px dashed #cbd5e1; }
-`;
+// ── Shared layout helper ─────────────────────────────────────────────
 function layout(
   c: AppContext,
   title: string,
@@ -362,69 +146,12 @@ function layout(
   children: any,
 ) {
   return c.html(
-    <html lang="en">
-      <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <title>{title} - Admin</title>
-        <style>{adminStyles}</style>
-      </head>
-      <body>
-        <header class="topbar">
-          <div class="topbar-inner">
-            <a href="/admin" class="brand">
-              LUNAR <span class="brand-accent">ADMIN</span>
-            </a>
-            <div class="gap-2">
-              <div class="badge">INTERNAL TOOLS</div>
-              <a
-                href="/admin/logout"
-                class="btn btn-ghost"
-                style="font-size: 0.8rem; padding: 0.4rem 0.75rem;"
-              >
-                Logout
-              </a>
-            </div>
-          </div>
-        </header>
-        <nav class="tabs">
-          <div class="tabs-inner">
-            <a
-              href="/admin"
-              class={`tab ${activeTab === "overview" ? "active" : ""}`}
-            >
-              Overview
-            </a>
-            <a
-              href="/admin/teachers"
-              class={`tab ${activeTab === "teachers" ? "active" : ""}`}
-            >
-              Teachers
-            </a>
-            <a
-              href="/admin/students"
-              class={`tab ${activeTab === "students" ? "active" : ""}`}
-            >
-              Students
-            </a>
-            <a
-              href="/admin/classes"
-              class={`tab ${activeTab === "classes" ? "active" : ""}`}
-            >
-              Classes
-            </a>
-            <a
-              href="/admin/attendance"
-              class={`tab ${activeTab === "attendance" ? "active" : ""}`}
-            >
-              Attendance
-            </a>
-          </div>
-        </nav>
-        <main class="main">{children}</main>
-      </body>
-    </html>,
+    <Layout role="admin" title={`${title} – Admin`} adminActiveTab={activeTab}>
+      {children}
+    </Layout>,
   );
 }
+
 // Icons
 const IconPlus = () => (
   <svg
@@ -1398,3 +1125,171 @@ adminRoutes.get("/attendance/export", async (c) => {
   );
   return c.body(csv);
 });
+
+// ── Today's Attendance (admin-scoped, all classes) ─────────────────────
+// NOTE: This route lives inside adminRoutes so the browser sends the
+// admin_session cookie (Path=/admin). Do NOT move it to a shared router.
+adminRoutes.get("/attendance/today", async (c) => {
+  const today = localDateKey();
+  const records = await listAttendanceForDay(c.env.DB_lunar_attendance, today);
+
+  const uniqueStudents = new Set(records.map((r) => r.studentId)).size;
+  const uniqueClasses = new Set(records.map((r) => r.classId)).size;
+  const totalCount = records.length;
+
+  const searchScript = `
+(function () {
+  var input = document.getElementById('today-search');
+  var countEl = document.getElementById('today-count');
+  var rows = Array.from(document.querySelectorAll('#today-table tbody tr'));
+  var total = rows.length;
+  if (!input) return;
+  input.addEventListener('input', function () {
+    var q = input.value.trim().toLowerCase();
+    var visible = 0;
+    rows.forEach(function (row) {
+      var text = (row.dataset.search || '').toLowerCase();
+      var match = !q || text.includes(q);
+      row.style.display = match ? '' : 'none';
+      if (match) visible++;
+    });
+    if (countEl) countEl.textContent = q
+      ? visible + ' of ' + total + ' records'
+      : total + ' record' + (total === 1 ? '' : 's');
+  });
+}());
+`;
+
+  return layout(
+    c,
+    "Today's Attendance",
+    "today",
+    <>
+      <div style="margin-bottom: 2rem;">
+        <div style="font-size: 0.72rem; font-weight: 800; color: var(--primary); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.4rem;">Live feed</div>
+        <div class="flex-between" style="align-items: flex-start; gap: 1rem;">
+          <div>
+            <h1 style="margin: 0 0 0.4rem;">Today's Attendance</h1>
+            <p class="text-muted" style="margin: 0; font-size: 0.9rem;">
+              All student check-ins recorded today across every class.
+            </p>
+          </div>
+          <span
+            style="
+              flex-shrink: 0; padding: 0.5rem 1.2rem;
+              background: linear-gradient(135deg, var(--primary), #f59e0b);
+              color: white; border-radius: 99px; font-size: 0.85rem;
+              font-weight: 700; white-space: nowrap;
+              box-shadow: 0 4px 12px rgba(217,119,6,0.3);
+            "
+          >
+            {today}
+          </span>
+        </div>
+      </div>
+
+      {/* ── Stat cards ── */}
+      <div class="grid" style="margin-bottom: 2rem;">
+        <div class="stat-card">
+          <div class="stat-label">Total Check-ins</div>
+          <div class="stat-value">{totalCount}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Unique Students</div>
+          <div class="stat-value">{uniqueStudents}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Active Classes</div>
+          <div class="stat-value">{uniqueClasses}</div>
+        </div>
+      </div>
+
+      {/* ── Search ── */}
+      <div
+        style="
+          display: flex; align-items: center; gap: 0.75rem;
+          background: white; border: 1px solid var(--line);
+          border-radius: var(--rounded-xl); padding: 0 1rem;
+          margin-bottom: 1.5rem; box-shadow: var(--shadow-sm);
+          transition: border-color 0.2s, box-shadow 0.2s;
+        "
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: var(--muted); flex-shrink:0;">
+          <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+        </svg>
+        <input
+          id="today-search"
+          type="search"
+          placeholder="Search by student name or class code…"
+          autocomplete="off"
+          style="
+            flex: 1; border: none; outline: none; background: transparent;
+            padding: 0.85rem 0; font-family: inherit; font-size: 0.95rem;
+            color: var(--ink);
+          "
+        />
+        <span id="today-count" style="color: var(--muted); font-size: 0.78rem; font-weight: 700; white-space: nowrap; flex-shrink: 0;">
+          {totalCount} record{totalCount === 1 ? "" : "s"}
+        </span>
+      </div>
+
+      {/* ── Table or empty state ── */}
+      {records.length === 0 ? (
+        <div class="empty-state">
+          No attendance check-ins recorded yet today. Start a class QR session to see records here.
+        </div>
+      ) : (
+        <div class="table-container">
+          <table id="today-table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Student</th>
+                <th>Class</th>
+                <th>Device</th>
+                <th>Country</th>
+              </tr>
+            </thead>
+            <tbody>
+              {records.map((r) => (
+                <tr data-search={`${r.studentName} ${r.classCode} ${r.className}`.toLowerCase()}>
+                  <td>
+                    <span
+                      class="badge badge-primary"
+                      style="font-variant-numeric: tabular-nums;"
+                    >
+                      {r.time}
+                    </span>
+                  </td>
+                  <td>
+                    <div class="font-semibold">{r.studentName}</div>
+                    <div class="text-muted text-sm">{r.studentId}</div>
+                  </td>
+                  <td>
+                    <a
+                      href={`/admin/classes/${r.classId}`}
+                      class="badge badge-primary"
+                      style="text-decoration: none; margin-bottom: 0.2rem; display: inline-block;"
+                    >
+                      {r.classCode}
+                    </a>
+                    <div class="text-muted text-sm">{r.className}</div>
+                  </td>
+                  <td>
+                    <span class="text-sm" style="text-transform: capitalize;">
+                      {r.deviceType ?? "unknown"}
+                    </span>
+                  </td>
+                  <td>{r.country ?? "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <script dangerouslySetInnerHTML={{ __html: searchScript }} />
+    </>,
+  );
+});
+

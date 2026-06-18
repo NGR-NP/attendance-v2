@@ -245,21 +245,27 @@ export async function getTeacherBySessionToken(
     .first<ExternalTeacher>();
 }
 
-export async function listTeacherClasses(db: D1Database, teacherId: string) {
+export async function listTeacherClasses(
+  db: D1Database,
+  teacherId: string,
+): Promise<(ExternalClass & { studentCount: number })[]> {
   //
   const { results } = await db
     .prepare(
-      `SELECT c.id, c.name, c.code
+      `SELECT c.id, c.name, c.code, COUNT(sc.student_id) AS studentCount
          FROM teacher_classes tc
          JOIN classes c ON c.id = tc.class_id
+         LEFT JOIN student_classes sc ON sc.class_id = c.id
         WHERE tc.teacher_id = ?
+        GROUP BY c.id, c.name, c.code
         ORDER BY c.code`,
     )
     .bind(teacherId)
-    .all<ExternalClass>();
+    .all<ExternalClass & { studentCount: number }>();
 
   return results ?? [];
 }
+
 
 export async function teacherCanAccessClass(
   db: D1Database,
@@ -979,3 +985,127 @@ export async function createStudentWithContact(db: D1Database, name: string, ema
     .run();
   return { id };
 }
+
+export async function listStudentEnrolledClassesForTeacher(
+  db: D1Database,
+  studentId: string,
+  teacherId: string,
+) {
+  const { results } = await db
+    .prepare(
+      `SELECT c.id, c.name, c.code
+         FROM student_classes sc
+         JOIN classes c ON c.id = sc.class_id
+         JOIN teacher_classes tc ON tc.class_id = sc.class_id
+        WHERE sc.student_id = ?
+          AND tc.teacher_id = ?
+        ORDER BY c.code`,
+    )
+    .bind(studentId, teacherId)
+    .all<ExternalClass>();
+
+  return results ?? [];
+}
+
+export async function verifyStudentAccessForTeacher(
+  db: D1Database,
+  accessToken: string,
+  teacherId: string,
+) {
+  return db
+    .prepare(
+      `SELECT s.id AS studentId, s.name AS studentName, s.email AS studentEmail
+         FROM student_access_tokens sat
+         JOIN students s ON s.id = sat.student_id
+         JOIN student_classes sc ON sc.student_id = s.id
+         JOIN teacher_classes tc ON tc.class_id = sc.class_id
+        WHERE sat.token = ?
+          AND sat.revoked_at IS NULL
+          AND sat.expires_at > ?
+          AND sat.last_used_at > ?
+          AND tc.teacher_id = ?
+        LIMIT 1`,
+    )
+    .bind(
+      accessToken,
+      nowSeconds(),
+      nowSeconds() - STUDENT_IDLE_TIMEOUT_SECONDS,
+      teacherId,
+    )
+    .first<ExternalStudentAccess>();
+}
+
+// ── Today's Attendance ────────────────────────────────────────────────
+
+export interface TodayAttendanceRecord {
+  id: string;
+  studentName: string;
+  studentId: string;
+  className: string;
+  classCode: string;
+  classId: string;
+  /** Local time string e.g. "09:32:15" (NPT +05:45) */
+  time: string;
+  deviceType: string | null;
+  country: string | null;
+}
+
+/**
+ * List all attendance records for a given local date key (YYYY-MM-DD).
+ * When `options.teacherId` is supplied, results are scoped to that teacher's
+ * assigned classes only — prevents data leakage between teachers.
+ */
+export async function listAttendanceForDay(
+  db: D1Database,
+  day: string,
+  options?: { teacherId?: string },
+): Promise<TodayAttendanceRecord[]> {
+  if (options?.teacherId) {
+    // Filtered path: JOIN teacher_classes to scope to the teacher's classes.
+    // Uses a JOIN instead of a subquery so D1 can use an index efficiently.
+    const { results } = await db
+      .prepare(
+        `SELECT r.id,
+                r.student_name   AS studentName,
+                r.student_id     AS studentId,
+                c.name           AS className,
+                c.code           AS classCode,
+                r.class_id       AS classId,
+                time(r.attended_at, 'unixepoch', '+5 hours', '+45 minutes') AS time,
+                r.device_type    AS deviceType,
+                r.country
+           FROM attendance_records r
+           JOIN classes c          ON c.id = r.class_id
+           JOIN teacher_classes tc ON tc.class_id = r.class_id
+          WHERE r.attendance_day = ?
+            AND tc.teacher_id = ?
+          ORDER BY r.attended_at DESC`,
+      )
+
+      .bind(day, options.teacherId)
+      .all<TodayAttendanceRecord>();
+    return results ?? [];
+  }
+
+  // Unfiltered path: admin sees all records for the day.
+  const { results } = await db
+    .prepare(
+      `SELECT r.id,
+              r.student_name   AS studentName,
+              r.student_id     AS studentId,
+              c.name           AS className,
+              c.code           AS classCode,
+              r.class_id       AS classId,
+              time(r.attended_at, 'unixepoch', '+5 hours', '+45 minutes') AS time,
+              r.device_type    AS deviceType,
+              r.country
+         FROM attendance_records r
+         JOIN classes c ON c.id = r.class_id
+        WHERE r.attendance_day = ?
+        ORDER BY r.attended_at DESC`,
+    )
+    .bind(day)
+    .all<TodayAttendanceRecord>();
+  return results ?? [];
+}
+

@@ -5,6 +5,7 @@ import { Env } from "./types";
 import { teacherRoutes } from "./routes/teacher";
 import { studentRoutes, STUDENT_SESSION_COOKIE } from "./routes/student";
 import { adminRoutes } from "./routes/admin";
+import { todayAttendanceRoutes } from "./routes/todayAttendance";
 import {
   AttendanceScanMetadata,
   claimStudentAccessGrant,
@@ -17,6 +18,7 @@ import {
   verifyStudentAccessForClass,
   getStudentBySessionToken,
   touchStudentSession,
+  getClassById,
 } from "./lib/externalDummy";
 import { localDateKey, SQLITE_LOCALTIME_MODIFIER } from "./lib/date";
 import { rateLimit, requestIp } from "./lib/rateLimit";
@@ -183,6 +185,7 @@ app.use("*", async (c, next) => {
 
 app.route("/teacher", teacherRoutes);
 app.route("/admin", adminRoutes);
+app.route("/attendance", todayAttendanceRoutes);
 app.route("/", studentRoutes);
 
 // External dummy API backed by DB_lunar_attendance.
@@ -340,6 +343,7 @@ app.post("/api/attend", async (c) => {
 
   const body = await c.req.json<{
     sessionId: string;
+    classId?: string;
     checkoutAnyway?: boolean;
     metadata?: AttendanceScanMetadata;
   }>();
@@ -375,11 +379,30 @@ app.post("/api/attend", async (c) => {
     return c.json({ error: "Please connect to the class Wi-Fi network" }, 403);
   }
 
+  let targetClassId = session.class_id;
+  if (session.class_id === "__all__") {
+    if (!body.classId) {
+      return c.json({ error: "Class selection required" }, 400);
+    }
+    targetClassId = body.classId;
+
+    // Check teacher assignment
+    const isTeacherAssigned = await c.env.DB_lunar_attendance.prepare(
+      `SELECT 1 FROM teacher_classes WHERE teacher_id = ? AND class_id = ?`,
+    )
+      .bind(session.teacher_id, targetClassId)
+      .first();
+
+    if (!isTeacherAssigned) {
+      return c.json({ error: "Teacher is not assigned to the selected class" }, 403);
+    }
+  }
+
   // Check enrollment
   const isEnrolled = await c.env.DB_lunar_attendance.prepare(
     `SELECT 1 FROM student_classes WHERE student_id = ? AND class_id = ?`,
   )
-    .bind(student.id, session.class_id)
+    .bind(student.id, targetClassId)
     .first();
 
   if (!isEnrolled) {
@@ -392,7 +415,7 @@ app.post("/api/attend", async (c) => {
   const existingRecord = await c.env.DB_lunar_attendance.prepare(
     `SELECT id, attended_at, checked_out_at FROM attendance_records WHERE class_id = ? AND student_id = ? AND attendance_day = ? LIMIT 1`,
   )
-    .bind(session.class_id, student.id, attendanceDay)
+    .bind(targetClassId, student.id, attendanceDay)
     .first<{
       id: string;
       attended_at: number;
@@ -426,13 +449,15 @@ app.post("/api/attend", async (c) => {
   } else {
     await markExternalAttendance(c.env.DB_lunar_attendance, {
       sessionId: body.sessionId,
-      classId: session.class_id,
+      classId: targetClassId,
       studentId: student.id,
       studentName: student.name,
       attendanceDay,
       metadata: requestScanMetadata(c.req.raw, body.metadata),
     });
   }
+
+  const targetClass = await getClassById(c.env.DB_lunar_attendance, targetClassId);
 
   const doId = c.env.durable_objects_lunar_attendance.idFromName(
     body.sessionId,
@@ -446,6 +471,8 @@ app.post("/api/attend", async (c) => {
         studentName: student.name,
         alreadyMarked,
         checkedOut,
+        classCode: targetClass?.code,
+        className: targetClass?.name,
       }),
     }),
   );
@@ -493,13 +520,15 @@ app.post("/api/sessions", async (c) => {
     return c.json({ error: "Missing or invalid class ID" }, 400);
   }
 
-  const allowed = await teacherCanAccessClass(
-    c.env.DB_lunar_attendance,
-    teacher.id,
-    classId,
-  );
-  if (!allowed) {
-    return c.json({ error: "Teacher is not assigned to this class" }, 403);
+  if (classId !== "__all__") {
+    const allowed = await teacherCanAccessClass(
+      c.env.DB_lunar_attendance,
+      teacher.id,
+      classId,
+    );
+    if (!allowed) {
+      return c.json({ error: "Teacher is not assigned to this class" }, 403);
+    }
   }
 
   const teacherIp = requestIp(c.req.raw);
