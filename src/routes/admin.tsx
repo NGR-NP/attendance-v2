@@ -887,12 +887,18 @@ adminRoutes.get("/classes/:id", async (c) => {
   const classId = c.req.param("id");
   const cls = await getClassFull(c.env.DB_lunar_attendance, classId);
   if (!cls) return c.text("Class not found", 404);
-  const enrolled = await listEnrolledStudents(c.env.DB_lunar_attendance, classId);
+  const enrolled = await listEnrolledStudents(
+    c.env.DB_lunar_attendance,
+    classId,
+  );
   const unenrolled = await listUnenrolledStudents(
     c.env.DB_lunar_attendance,
     classId,
   );
-  const assigned = await listAssignedTeachers(c.env.DB_lunar_attendance, classId);
+  const assigned = await listAssignedTeachers(
+    c.env.DB_lunar_attendance,
+    classId,
+  );
   const unassigned = await listUnassignedTeachers(
     c.env.DB_lunar_attendance,
     classId,
@@ -935,7 +941,10 @@ adminRoutes.get("/classes/:id", async (c) => {
           </h1>
         </div>
         <div>
-          <a href={`/admin/classes/${classId}/onboarding`} class="btn btn-primary">
+          <a
+            href={`/admin/classes/${classId}/onboarding`}
+            class="btn btn-primary"
+          >
             Student Onboarding QR
           </a>
         </div>
@@ -1156,8 +1165,8 @@ adminRoutes.get("/classes/:id/onboarding", async (c) => {
         classId,
         exp: Date.now() + 24 * 60 * 60 * 1000,
       },
-      c.env.ADMIN_SECRET
-    )
+      c.env.ADMIN_SECRET,
+    ),
   );
   const url = `${new URL(c.req.url).origin}/register?token=${encodeURIComponent(tokenPayload)}`;
 
@@ -1179,15 +1188,47 @@ adminRoutes.get("/classes/:id/onboarding", async (c) => {
         </div>
       </div>
       <div class="card" style="text-align: center; padding: 2rem;">
-        <p>Scan this QR to register and enroll in <strong>{cls.name}</strong></p>
-        <div style="background: white; padding: 1rem; display: inline-block; border-radius: 8px;">
-          <img src={`https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(url)}`} alt="Onboarding QR" />
-        </div>
-        <p class="text-muted" style="margin-top: 1rem; word-break: break-all;">
-          <a href={url} target="_blank">{url}</a>
+        <p>
+          Scan this QR to register and enroll in <strong>{cls.name}</strong>
         </p>
+        <div style="background: white; padding: 1rem; display: inline-block; border-radius: 8px;">
+          <div id="qr-wrap">
+            <div id="qr"></div>
+          </div>
+        </div>
+        <div style="margin-top: 1rem; display: flex; gap: 1rem;">
+          <a
+            href={url}
+            target="_blank"
+            class="btn btn-primary"
+            style="flex: 1;"
+          >
+            Open in new tab
+          </a>
+          <button
+            class="btn btn-secondary"
+            onclick={`navigator.clipboard.writeText("${url}")`}
+            style="flex: 1;"
+          >
+            Copy URL
+          </button>
+        </div>
       </div>
-    </>
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js" />
+
+      <script
+        dangerouslySetInnerHTML={{
+          __html: `
+          new QRCode(document.getElementById('qr'), {
+            text: ${JSON.stringify(url)},
+            width: 280,
+            height: 280,
+            correctLevel: QRCode.CorrectLevel.H
+          })
+        `,
+        }}
+      />
+    </>,
   );
 });
 

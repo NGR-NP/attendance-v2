@@ -338,7 +338,9 @@ function layout(title: string, teacher: ExternalTeacher | null, children: any) {
               {isDisplayRole ? (
                 <span class="brand">Attendance Display</span>
               ) : (
-                <a class="brand" href="/teacher/class">Attendance</a>
+                <a class="brand" href="/teacher/class">
+                  Attendance
+                </a>
               )}
               {teacher ? (
                 <div class="nav">
@@ -517,7 +519,10 @@ teacherRoutes.get("/class", async (c) => {
   const teacher = await currentTeacher(c);
   if (!teacher) return c.html(loginPage());
 
-  const classes = await listTeacherClasses(c.env.DB_lunar_attendance, teacher.id);
+  const classes = await listTeacherClasses(
+    c.env.DB_lunar_attendance,
+    teacher.id,
+  );
   const classCards = await Promise.all(
     classes.map(async (classItem) => ({
       ...classItem,
@@ -553,13 +558,18 @@ teacherRoutes.get("/class", async (c) => {
                   </div>
                 </div>
                 <div class="actions">
-                  <a class="button" href={`/teacher/class/${classItem.id}/attendance/start`}>Display QR</a>
+                  <a
+                    class="button"
+                    href={`/teacher/class/${classItem.id}/attendance/start`}
+                  >
+                    Display QR
+                  </a>
                 </div>
               </article>
             ))}
           </div>
-        </>
-      )
+        </>,
+      ),
     );
   }
 
@@ -913,7 +923,9 @@ teacherRoutes.get("/class/:classId/attendance/start", async (c) => {
               {isDisplayRole ? (
                 <span class="brand">Attendance Display</span>
               ) : (
-                <a class="brand" href="/teacher/class">Attendance</a>
+                <a class="brand" href="/teacher/class">
+                  Attendance
+                </a>
               )}
               <div class="nav">
                 <span>{teacher.name}</span>
@@ -925,8 +937,14 @@ teacherRoutes.get("/class/:classId/attendance/start", async (c) => {
                     Back to stats
                   </a>
                 ) : (
-                  <form method="post" action="/teacher/logout" style="margin:0;">
-                    <button class="secondary" type="submit">Sign out</button>
+                  <form
+                    method="post"
+                    action="/teacher/logout"
+                    style="margin:0;"
+                  >
+                    <button class="secondary" type="submit">
+                      Sign out
+                    </button>
                   </form>
                 )}
               </div>
@@ -938,7 +956,8 @@ teacherRoutes.get("/class/:classId/attendance/start", async (c) => {
                 <div class="eyebrow">{classItem.code}</div>
                 <h1>Live attendance</h1>
                 <p>
-                  Keep this screen visible during class. The QR is static, but each successful scan appears in the log automatically.
+                  Keep this screen visible during class. The QR is static, but
+                  each successful scan appears in the log automatically.
                 </p>
               </div>
               <button id="restartBtn" class="secondary" type="button">
@@ -950,9 +969,7 @@ teacherRoutes.get("/class/:classId/attendance/start", async (c) => {
                 <div class="section-head" style="margin-top: 0;">
                   <div>
                     <h2>Student scan code</h2>
-                    <p>
-                      Students scan this code from their registered device.
-                    </p>
+                    <p>Students scan this code from their registered device.</p>
                   </div>
                 </div>
                 <div id="qr-wrap">
@@ -1312,8 +1329,8 @@ teacherRoutes.get("/class/:classId/student/:studentId/access", async (c) => {
         studentId: student.id,
         exp: Date.now() + 24 * 60 * 60 * 1000,
       },
-      c.env.ADMIN_SECRET
-    )
+      c.env.ADMIN_SECRET,
+    ),
   );
   const accessUrl = `${new URL(c.req.url).origin}/register?token=${encodeURIComponent(tokenPayload)}`;
 

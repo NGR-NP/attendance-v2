@@ -3,12 +3,12 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import { Env } from "../types";
-import { 
-  createStudentWithContact, 
-  enrollStudentInClass, 
-  getClassFull, 
-  getStudentBySessionToken, 
-  createStudentSession 
+import {
+  createStudentWithContact,
+  enrollStudentInClass,
+  getClassFull,
+  getStudentBySessionToken,
+  createStudentSession,
 } from "../lib/externalDummy";
 import { verifyToken } from "../lib/token";
 import { rateLimit, requestIp } from "../lib/rateLimit";
@@ -130,7 +130,13 @@ const studentStyles = `
   button:hover { opacity: 0.9; }
 `;
 
-function RegistrationLayout({ title, children }: { title: string, children: any }) {
+function RegistrationLayout({
+  title,
+  children,
+}: {
+  title: string;
+  children: any;
+}) {
   return (
     <html>
       <head>
@@ -139,9 +145,7 @@ function RegistrationLayout({ title, children }: { title: string, children: any 
         <style dangerouslySetInnerHTML={{ __html: studentStyles }} />
       </head>
       <body>
-        <div class="panel">
-          {children}
-        </div>
+        <div class="panel">{children}</div>
       </body>
     </html>
   );
@@ -157,7 +161,7 @@ studentRoutes.get("/register", async (c) => {
         <div class="eyebrow">Error</div>
         <h1>Missing QR Token</h1>
         <p>Please scan a valid student onboarding or access QR code.</p>
-      </RegistrationLayout>
+      </RegistrationLayout>,
     );
   }
 
@@ -168,14 +172,20 @@ studentRoutes.get("/register", async (c) => {
         <div class="eyebrow">Error</div>
         <h1>QR Code Expired</h1>
         <div class="status error">Token is invalid or expired</div>
-        <p>This QR code has expired or is invalid. Please ask your teacher for a new one.</p>
-      </RegistrationLayout>
+        <p>
+          This QR code has expired or is invalid. Please ask your teacher for a
+          new one.
+        </p>
+      </RegistrationLayout>,
     );
   }
 
   // Handle returning student directly logging in
   if (payload.type === "returning_student") {
-    const { sessionId, expiresAt } = await createStudentSession(c.env.DB_lunar_attendance, payload.studentId);
+    const { sessionId, expiresAt } = await createStudentSession(
+      c.env.DB_lunar_attendance,
+      payload.studentId,
+    );
     setCookie(c, STUDENT_SESSION_COOKIE, sessionId, {
       path: "/",
       httpOnly: true,
@@ -189,8 +199,11 @@ studentRoutes.get("/register", async (c) => {
         <div class="eyebrow">Welcome Back</div>
         <h1>Device Authorized</h1>
         <div class="status success">Ready for Attendance</div>
-        <p>Your session has been securely saved to this device. You can now use this device to scan the static attendance QR in class.</p>
-      </RegistrationLayout>
+        <p>
+          Your session has been securely saved to this device. You can now use
+          this device to scan the static attendance QR in class.
+        </p>
+      </RegistrationLayout>,
     );
   }
 
@@ -207,30 +220,44 @@ studentRoutes.get("/register", async (c) => {
       <p>Fill out your details to enroll in the class and link your device.</p>
       <form method="post" action="/register">
         <input type="hidden" name="token" value={token} />
-        
+
         <div class="form-group">
           <label>Full Name</label>
           <input type="text" name="name" required placeholder="John Doe" />
         </div>
-        
+
         <div class="form-group">
           <label>Email Address</label>
-          <input type="email" name="email" required placeholder="john@example.com" />
+          <input
+            type="email"
+            name="email"
+            required
+            placeholder="john@example.com"
+          />
         </div>
 
         <div class="form-group">
           <label>Contact Number</label>
-          <input type="tel" name="contactNumber" required placeholder="+1 234 567 8900" />
+          <input
+            type="tel"
+            name="contactNumber"
+            required
+            placeholder="+1 234 567 8900"
+          />
         </div>
 
         <div class="form-group">
           <label>Secondary Contact (Optional)</label>
-          <input type="tel" name="secondaryContact" placeholder="Parent or Guardian" />
+          <input
+            type="tel"
+            name="secondaryContact"
+            placeholder="Parent or Guardian"
+          />
         </div>
 
         <button type="submit">Complete Registration</button>
       </form>
-    </RegistrationLayout>
+    </RegistrationLayout>,
   );
 });
 
@@ -253,7 +280,7 @@ studentRoutes.post("/register", async (c) => {
         <h1>QR Code Expired</h1>
         <div class="status error">Token is invalid or expired</div>
         <p>Please ask your teacher for a new onboarding QR code.</p>
-      </RegistrationLayout>
+      </RegistrationLayout>,
     );
   }
 
@@ -262,12 +289,19 @@ studentRoutes.post("/register", async (c) => {
     body.name,
     body.email,
     body.contactNumber,
-    body.secondaryContact || ""
+    body.secondaryContact || "",
   );
 
-  await enrollStudentInClass(c.env.DB_lunar_attendance, studentId, payload.classId);
+  await enrollStudentInClass(
+    c.env.DB_lunar_attendance,
+    studentId,
+    payload.classId,
+  );
 
-  const { sessionId, expiresAt } = await createStudentSession(c.env.DB_lunar_attendance, studentId);
+  const { sessionId, expiresAt } = await createStudentSession(
+    c.env.DB_lunar_attendance,
+    studentId,
+  );
   setCookie(c, STUDENT_SESSION_COOKIE, sessionId, {
     path: "/",
     httpOnly: true,
@@ -281,8 +315,11 @@ studentRoutes.post("/register", async (c) => {
       <div class="eyebrow">Success</div>
       <h1>Registration Complete!</h1>
       <div class="status success">Device Linked</div>
-      <p>Welcome, {body.name}. You are now enrolled and your device is ready to scan the attendance QR in class.</p>
-    </RegistrationLayout>
+      <p>
+        Welcome, {body.name}. You are now enrolled and your device is ready to
+        scan the attendance QR in class.
+      </p>
+    </RegistrationLayout>,
   );
 });
 
@@ -295,10 +332,10 @@ studentRoutes.get("/student/enroll", (c) => c.redirect("/register"));
 
 studentRoutes.get("/attend", async (c) => {
   const sessionId = c.req.query("s") ?? "";
-  
+
   // Verify standard cookie session instead of localStorage
   const sessionToken = getCookie(c, STUDENT_SESSION_COOKIE);
-  const student = sessionToken 
+  const student = sessionToken
     ? await getStudentBySessionToken(c.env.DB_lunar_attendance, sessionToken)
     : null;
 
@@ -311,8 +348,12 @@ studentRoutes.get("/attend", async (c) => {
         Submitting attendance...
       </div>
       <div id="actions" style="display: none; gap: 10px; margin-top: 20px;">
-        <button id="btn-stay" style="background: var(--primary);">I will stay some more time</button>
-        <button id="btn-checkout" style="background: var(--danger);">Checkout anyway</button>
+        <button id="btn-stay" style="background: var(--primary);">
+          I will stay some more time
+        </button>
+        <button id="btn-checkout" style="background: var(--danger);">
+          Checkout anyway
+        </button>
       </div>
 
       <script
@@ -382,6 +423,6 @@ studentRoutes.get("/attend", async (c) => {
       `,
         }}
       />
-    </RegistrationLayout>
+    </RegistrationLayout>,
   );
 });
