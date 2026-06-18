@@ -662,24 +662,27 @@ export async function listStudentAttendanceRecords(
   //
   const { results } = await db
     .prepare(
-      `SELECT attendance_day AS day,
-              time(attended_at, 'unixepoch', '+5 hours', '+45 minutes') AS time,
-              CASE WHEN checked_out_at IS NOT NULL THEN time(checked_out_at, 'unixepoch', '+5 hours', '+45 minutes') END AS checkoutTime,
-              CASE WHEN checked_out_at IS NOT NULL THEN checked_out_at - attended_at ELSE NULL END AS durationSeconds,
-              session_id AS sessionId,
-              class_id AS classId,
-              requester_ip AS requesterIp,
-              user_agent AS userAgent,
-              device_type AS deviceType,
-              country,
-              client_timezone AS clientTimezone,
-              client_language AS clientLanguage,
-              client_platform AS clientPlatform,
-              screen_size AS screenSize
-         FROM attendance_records
-        WHERE class_id = ?
-          AND student_id = ?
-        ORDER BY attended_at DESC`,
+      `SELECT r.attendance_day AS day,
+              time(r.attended_at, 'unixepoch', '+5 hours', '+45 minutes') AS time,
+              CASE WHEN r.checked_out_at IS NOT NULL THEN time(r.checked_out_at, 'unixepoch', '+5 hours', '+45 minutes') END AS checkoutTime,
+              CASE WHEN r.checked_out_at IS NOT NULL THEN r.checked_out_at - r.attended_at ELSE NULL END AS durationSeconds,
+              r.session_id AS sessionId,
+              r.class_id AS classId,
+              c.code AS classCode,
+              c.name AS className,
+              r.requester_ip AS requesterIp,
+              r.user_agent AS userAgent,
+              r.device_type AS deviceType,
+              r.country,
+              r.client_timezone AS clientTimezone,
+              r.client_language AS clientLanguage,
+              r.client_platform AS clientPlatform,
+              r.screen_size AS screenSize
+         FROM attendance_records r
+         JOIN classes c ON c.id = r.class_id
+        WHERE r.class_id = ?
+          AND r.student_id = ?
+        ORDER BY r.attended_at DESC`,
     )
     .bind(classId, studentId)
     .all<{
@@ -689,6 +692,8 @@ export async function listStudentAttendanceRecords(
       durationSeconds: number | null;
       sessionId: string;
       classId: string;
+      classCode: string;
+      className: string;
       requesterIp: string | null;
       userAgent: string | null;
       deviceType: string | null;
@@ -701,8 +706,6 @@ export async function listStudentAttendanceRecords(
 
   return (results ?? []).map((row) => ({
     ...row,
-    classCode: "",
-    className: "",
     duration: formatDuration(row.durationSeconds),
   }));
 }
