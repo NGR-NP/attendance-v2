@@ -6,286 +6,36 @@ import { Env } from "../types";
 import {
   createStudentAccessGrant,
   createTeacherSession,
-  countClassStudents,
   deleteTeacherSession,
   ExternalClass,
   ExternalTeacher,
   findTeacherByCredentials,
   getClassById,
   getClassStudent,
-  getTeacherBySessionToken,
-  isTeacherPinRecentlyVerified,
-  listClassAttendanceDays,
-  listClassStudents,
-  listStudentAttendanceRecords,
-  listStudentAttendanceSummaries,
-  listTeacherClasses,
-  TEACHER_SESSION_COOKIE,
-  teacherCanAccessClass,
   verifyTeacherSessionPin,
+  teacherCanAccessClass,
+  listTeacherClasses,
+  listClassStudents,
+  listClassAttendanceDays,
+  listStudentAttendanceSummaries,
+  listStudentAttendanceRecords,
+  getClassStudent as getClassStudentHelper,
 } from "../lib/externalDummy";
 import { localDateKey, SQLITE_LOCALTIME_MODIFIER } from "../lib/date";
 import { rateLimit, requestIp } from "../lib/rateLimit";
+import {
+  currentTeacher,
+  currentTeacherSession,
+  TEACHER_SESSION_COOKIE,
+} from "../lib/auth";
+import { Layout } from "../components/Layout";
 
 export const teacherRoutes = new Hono<{ Bindings: Env }>();
 
 type AppContext = Context<{ Bindings: Env }>;
 
-const styles = `
-  @import url("https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800;900&display=swap");
-
-  :root {
-    color-scheme: light;
-    --font-sans: "Plus Jakarta Sans", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    --primary: lab(34.5327% 41.302 -79.0771);
-    --primary-soft: color-mix(in srgb, var(--primary), white 90%);
-    --primary-tint: color-mix(in srgb, var(--primary), white 76%);
-    --ink: #0f172a;
-    --muted: #64748b;
-    --line: rgba(148, 163, 184, 0.28);
-    --surface: rgba(255, 255, 255, 0.86);
-    --surface-solid: #ffffff;
-    --success: #15803d;
-    --danger: #b91c1c;
-    --shadow: 0 18px 48px rgba(15, 23, 42, 0.08);
-    --shadow-strong: 0 22px 60px rgba(15, 23, 42, 0.12);
-    --rounded-xs: 0.6rem;
-    --rounded-sm: 1rem;
-    --rounded-md: 1.4rem;
-    --rounded-lg: 2rem;
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0;
-    min-height: 100vh;
-    font-family: var(--font-sans);
-    font-synthesis: none;
-    text-rendering: optimizeLegibility;
-    -webkit-font-smoothing: antialiased;
-    -moz-osx-font-smoothing: grayscale;
-    background:
-      radial-gradient(circle at 12% -12%, color-mix(in srgb, var(--primary), white 84%) 0, rgba(255, 255, 255, 0) 34rem),
-      linear-gradient(140deg, #fbfcff 0%, #f7f8ff 44%, #f8fafc 100%);
-    color: var(--ink);
-  }
-  a { color: inherit; text-decoration: none; }
-  .shell { min-height: 100vh; }
-  .topbar {
-    position: sticky;
-    top: 0;
-    z-index: 10;
-    background: rgba(255, 255, 255, 0.78);
-    border-bottom: 1px solid var(--line);
-    backdrop-filter: blur(18px);
-  }
-  .topbar-inner { max-width: 1120px; margin: 0 auto; padding: 18px 24px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
-  .brand { color: var(--primary); font-size: 18px; font-weight: 900; letter-spacing: 0; }
-  .nav { display: flex; align-items: center; gap: 10px; color: #475569; font-size: 14px; font-weight: 600; }
-  .main { max-width: 1120px; margin: 0 auto; padding: 34px 24px 58px; }
-  .page-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 18px; margin-bottom: 24px; }
-  .page-copy { max-width: 650px; }
-  .eyebrow { color: var(--primary); font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 7px; }
-  h1 { margin: 0; font-size: 34px; line-height: 1.12; letter-spacing: 0; font-weight: 900; }
-  h2 { margin: 0; font-size: 20px; letter-spacing: 0; font-weight: 800; }
-  p { color: #475569; line-height: 1.62; margin: 8px 0 0; font-weight: 500; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; }
-  .hero-panel {
-    display: grid;
-    grid-template-columns: minmax(0, 1.4fr) minmax(240px, 0.8fr);
-    gap: 22px;
-    align-items: center;
-    margin-bottom: 22px;
-    padding: 20px 40px;
-    background:
-      linear-gradient(135deg, rgba(255,255,255,0.9), rgba(255,255,255,0.72)),
-      radial-gradient(circle at 100% 0%, color-mix(in srgb, var(--primary), white 84%), transparent 24rem);
-    border: 1px solid rgba(255, 255, 255, 0.82);
-    border-radius: var(--rounded-lg);
-    box-shadow: var(--shadow);
-    outline: 1px solid var(--line);
-  }
-  .hero-panel h1 { max-width: 720px; }
-  .summary-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-  .stat-card {
-    min-height: 108px;
-    padding: 16px 20px;
-    background: rgba(255, 255, 255, 0.74);
-    border: 1px solid var(--line);
-    border-radius: var(--rounded-sm);
-  }
-  .stat-value { color: var(--primary); font-size: 48px; font-weight: 900; line-height: 1; font-variant-numeric: tabular-nums; }
-  .stat-label { margin-top: 8px; color: #475569; font-size: 13px; font-weight: 800; }
-  .section-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin: 26px 0 14px; }
-  .section-head h2 { font-size: 22px; }
-  .card {
-    background: var(--surface);
-    border: 1px solid rgba(255, 255, 255, 0.78);
-    border-radius: var(--rounded-lg);
-    padding: 24px 28px;
-    box-shadow: var(--shadow);
-    outline: 1px solid var(--line);
-  }
-  .class-card { display: grid; gap: 18px; }
-  .class-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
-  .class-code {
-    display: inline-flex;
-    align-items: center;
-    min-height: 30px;
-    padding: 0 11px;
-    border-radius: var(--rounded-md);
-    background: var(--primary-soft);
-    color: var(--primary);
-    font-size: 13px;
-    font-weight: 900;
-  }
-  .class-meta { display: flex; flex-wrap: wrap; gap: 8px; }
-  .pill {
-    display: inline-flex;
-    align-items: center;
-    min-height: 30px;
-    padding: 0 11px;
-    border-radius: var(--rounded-sm);
-    background: rgba(255, 255, 255, 0.72);
-    border: 1px solid var(--line);
-    color: #475569;
-    font-size: 13px;
-    font-weight: 800;
-  }
-  article.card { transition: transform 160ms ease, box-shadow 160ms ease, outline-color 160ms ease; }
-  article.card:hover { transform: translateY(-2px); box-shadow: var(--shadow-strong); outline-color: var(--primary-tint); }
-  .metric { color: var(--ink); font-size: 28px; font-weight: 900; margin-top: 8px; font-variant-numeric: tabular-nums; }
-  .metric-line { color: var(--ink); font-size: 18px; font-weight: 900; }
-  .muted { color: var(--muted); }
-  .small { font-size: 13px; }
-  .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-  .actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-  .button, button {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-height: 40px;
-    padding: 0 16px;
-    border-radius: var(--rounded-sm);
-    border: 1px solid color-mix(in srgb, var(--primary), black 8%);
-    background: linear-gradient(180deg, color-mix(in srgb, var(--primary), white 10%), var(--primary));
-    color: #fff;
-    box-shadow: 0 10px 24px color-mix(in srgb, var(--primary), transparent 72%);
-    font-family: var(--font-sans);
-    font-size: 14px;
-    font-weight: 800;
-    cursor: pointer;
-    transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease;
-  }
-  .button:hover, button:hover { transform: translateY(-1px); box-shadow: 0 14px 32px color-mix(in srgb, var(--primary), transparent 68%); }
-  .button.secondary, button.secondary { background: rgba(255, 255, 255, 0.82); color: var(--ink); border-color: var(--line); box-shadow: 0 8px 22px rgba(15, 23, 42, 0.06); }
-  .button.secondary:hover, button.secondary:hover { border-color: var(--primary-tint); box-shadow: 0 12px 28px rgba(15, 23, 42, 0.08); }
-  .button.danger { background: #fff; color: var(--danger); border-color: #fecaca; box-shadow: 0 8px 22px rgba(185, 28, 28, 0.06); }
-  .table {
-    width: 100%;
-    border-collapse: separate;
-    border-spacing: 0;
-    background: var(--surface);
-    border: 1px solid var(--line);
-    border-radius: var(--rounded-lg);
-    overflow: hidden;
-    box-shadow: var(--shadow);
-  }
-  .table th, .table td { padding: 18px 28px; text-align: left; border-bottom: 1px solid rgba(226, 232, 240, 0.9); font-size: 14px; font-variant-numeric: tabular-nums; }
-  .table th { background: linear-gradient(180deg, #f8fafc, color-mix(in srgb, var(--primary), white 94%)); color: #475569; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; }
-  .table tbody tr { transition: background-color 150ms ease; }
-  .table tbody tr:hover { background: color-mix(in srgb, var(--primary), white 96%); }
-  .table tr:last-child td { border-bottom: 0; }
-  .cell-title { color: var(--ink); font-weight: 900; }
-  .cell-subtitle { margin-top: 3px; color: var(--muted); font-size: 13px; }
-  .empty-state {
-    padding: 28px;
-    text-align: center;
-    background: rgba(255, 255, 255, 0.46);
-  }
-  .empty-state h2 { font-size: 20px; }
-  .empty-state p { max-width: 520px; margin-left: auto; margin-right: auto; }
-  .login-wrap { max-width: 430px; margin: 9vh auto; padding: 0 20px; }
-  .login {
-    background: var(--surface);
-    border: 1px solid rgba(255, 255, 255, 0.82);
-    border-radius: var(--rounded-lg);
-    padding: 28px;
-    box-shadow: var(--shadow-strong);
-    outline: 1px solid var(--line);
-  }
-  label { display: grid; gap: 7px; font-size: 13px; font-weight: 800; color: #334155; }
-  input {
-    min-height: 42px;
-    border: 1px solid var(--line);
-    border-radius: var(--rounded-xs);
-    padding: 0 20px;
-    background: rgba(255, 255, 255, 0.86);
-    color: var(--ink);
-    font-family: var(--font-sans);
-    font-size: 14px;
-    outline: none;
-    transition: border-color 160ms ease, box-shadow 160ms ease;
-  }
-  input:focus { border-color: var(--primary-tint); box-shadow: 0 0 0 4px var(--primary-soft); }
-  .form-stack { display: grid; gap: 14px; margin-top: 18px; }
-  .notice { background: #ecfdf5; border: 1px solid #bbf7d0; color: #166534; border-radius: 8px; padding: 12px 14px; font-weight: 800; }
-  .error { background: #fef2f2; border: 1px solid #fecaca; color: #991b1b; border-radius: 8px; padding: 12px 14px; font-weight: 800; }
-  #qr-wrap {
-    display: grid;
-    place-items: center;
-    min-height: 316px;
-    background: linear-gradient(145deg, rgba(255,255,255,0.94), color-mix(in srgb, var(--primary), white 96%));
-    border: 1px solid var(--line);
-    border-radius: var(--rounded-lg);
-    box-shadow: var(--shadow);
-  }
-  #qr canvas, #qr img { border-radius: 8px; }
-  #status { min-height: 28px; font-weight: 900; color: var(--success); }
-  #scan-url { overflow-wrap: anywhere; font-size: 13px; color: #475569; }
-  .live-grid { display: grid; grid-template-columns: minmax(300px, 1.15fr) minmax(280px, 0.85fr); gap: 18px; align-items: start; }
-  .qr-caption { margin-top: 14px; }
-  .log-list { display: grid; gap: 10px; margin-top: 12px; }
-  .log-list p {
-    margin: 0;
-    padding: 12px 20px;
-    background: rgba(255, 255, 255, 0.62);
-    border: 1px solid var(--line);
-    border-radius: var(--rounded-sm);
-    color: #334155;
-    font-size: 14px;
-  }
-  .support-list { display: grid; gap: 10px; margin: 16px 0 0; padding: 0; list-style: none; }
-  .support-list li { display: flex; gap: 10px; color: #475569; line-height: 1.45; }
-  .support-list li::before { content: ""; flex: 0 0 7px; width: 7px; height: 7px; margin-top: 8px; border-radius: 999px; background: var(--primary); }
-  @media (max-width: 720px) {
-    .topbar-inner, .page-head, .row, .section-head, .class-top { align-items: flex-start; flex-direction: column; }
-    .hero-panel, .live-grid { grid-template-columns: 1fr; }
-    .summary-grid { grid-template-columns: 1fr; }
-    .main { padding: 24px 16px 48px; }
-    .table { display: block; overflow-x: auto; }
-  }
-`;
-
 function cookieSecure(c: AppContext) {
   return new URL(c.req.url).protocol === "https:";
-}
-
-async function currentTeacher(c: AppContext) {
-  const token = getCookie(c, TEACHER_SESSION_COOKIE);
-  if (!token) return null;
-
-  return getTeacherBySessionToken(c.env.DB_lunar_attendance, token);
-}
-
-async function currentTeacherSession(c: AppContext) {
-  const token = getCookie(c, TEACHER_SESSION_COOKIE);
-  if (!token) return null;
-
-  const teacher = await getTeacherBySessionToken(
-    c.env.DB_lunar_attendance,
-    token,
-  );
-  return teacher ? { token, teacher } : null;
 }
 
 function currentPath(c: AppContext) {
@@ -309,10 +59,10 @@ async function requireRecentTeacherPin(
   c: AppContext,
   teacher: ExternalTeacher,
 ) {
-  const token = getCookie(c, TEACHER_SESSION_COOKIE);
-  const verified = await isTeacherPinRecentlyVerified(
-    c.env.DB_lunar_attendance,
-    token,
+  const token = currentTeacherSession(c).then((s) => s?.token);
+  const realToken = await token;
+  const verified = await import("../lib/externalDummy").then((m) =>
+    m.isTeacherPinRecentlyVerified(c.env.DB_lunar_attendance, realToken),
   );
   if (verified) return null;
 
@@ -321,80 +71,51 @@ async function requireRecentTeacherPin(
   );
 }
 
-function layout(title: string, teacher: ExternalTeacher | null, children: any) {
-  const isDisplayRole = teacher?.role === "attendance_display";
-
+function layout(
+  title: string,
+  teacher: ExternalTeacher | null,
+  children: any,
+  activeTab?: string,
+) {
   return (
-    <html>
-      <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <title>{title}</title>
-        <style>{styles}</style>
-      </head>
-      <body>
-        <div class="shell">
-          <header class="topbar">
-            <div class="topbar-inner">
-              {isDisplayRole ? (
-                <span class="brand">Attendance Display</span>
-              ) : (
-                <a class="brand" href="/teacher/class">
-                  Attendance
-                </a>
-              )}
-              {teacher ? (
-                <div class="nav">
-                  <span>{teacher.name}</span>
-                  <form method="post" action="/teacher/logout">
-                    <button class="secondary" type="submit">
-                      Sign out
-                    </button>
-                  </form>
-                </div>
-              ) : null}
-            </div>
-          </header>
-          <main class="main">{children}</main>
-        </div>
-      </body>
-    </html>
+    <Layout
+      title={title}
+      role="teacher"
+      userName={teacher?.name}
+      teacherActiveTab={activeTab || "classes"}
+    >
+      {children}
+    </Layout>
   );
 }
 
+
 function loginPage(error?: string) {
   return (
-    <html>
-      <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-
-        <title>Teacher Login</title>
-        <style>{styles}</style>
-      </head>
-      <body>
-        <div class="login-wrap">
-          <div class="login">
-            <div class="eyebrow">Teacher</div>
-            <h1>Open your attendance workspace</h1>
-            <p>
-              Sign in with the dummy external teacher account to manage classes,
-              student access, and live QR attendance.
-            </p>
-            {error ? <p class="error">{error}</p> : null}
-            <form class="form-stack" method="post" action="/teacher/login">
-              <label>
-                Email
-                <input name="email" type="email" value="teacher@example.com" />
-              </label>
-              <label>
-                PIN
-                <input name="pin" type="password" value="1234" />
-              </label>
-              <button type="submit">Sign in</button>
-            </form>
-          </div>
+    <Layout title="Teacher Login" role="teacher">
+      <div class="login-wrap">
+        <div class="login">
+          <div class="eyebrow">Teacher</div>
+          <h1>Open your attendance workspace</h1>
+          <p>
+            Sign in with the dummy external teacher account to manage classes,
+            student access, and live QR attendance.
+          </p>
+          {error ? <p class="error">{error}</p> : null}
+          <form class="form-stack" method="post" action="/teacher/login">
+            <label>
+              Email
+              <input name="email" type="email" value="teacher@example.com" />
+            </label>
+            <label>
+              PIN
+              <input name="pin" type="password" value="1234" />
+            </label>
+            <button type="submit">Sign in</button>
+          </form>
         </div>
-      </body>
-    </html>
+      </div>
+    </Layout>
   );
 }
 
@@ -420,6 +141,7 @@ function pinVerifyPage(teacher: ExternalTeacher, next: string, error?: string) {
         </form>
       </div>
     </div>,
+    "classes"
   );
 }
 
@@ -519,18 +241,9 @@ teacherRoutes.get("/class", async (c) => {
   const teacher = await currentTeacher(c);
   if (!teacher) return c.html(loginPage());
 
-  const classes = await listTeacherClasses(
+  const classCards = await listTeacherClasses(
     c.env.DB_lunar_attendance,
     teacher.id,
-  );
-  const classCards = await Promise.all(
-    classes.map(async (classItem) => ({
-      ...classItem,
-      studentCount: await countClassStudents(
-        c.env.DB_lunar_attendance,
-        classItem.id,
-      ),
-    })),
   );
 
   if (teacher.role === "attendance_display") {
@@ -591,6 +304,14 @@ teacherRoutes.get("/class", async (c) => {
               student access. Class rosters are synced from the external dummy
               database for this prototype.
             </p>
+            <div style="margin-top: 20px; display: flex; gap: 12px; flex-wrap: wrap;">
+              <a class="button" href="/teacher/attendance/main">
+                Start Main QR Session
+              </a>
+              <a class="button secondary" href="/attendance/today">
+                Today's Attendance
+              </a>
+            </div>
           </div>
           <div class="summary-grid">
             <div class="stat-card">
@@ -896,6 +617,185 @@ teacherRoutes.get("/class/:classId/attendance", async (c) => {
   );
 });
 
+function renderLiveAttendancePage(
+  c: AppContext,
+  teacher: ExternalTeacher,
+  classItem: { id: string; code: string; name: string },
+) {
+  const isDisplayRole = teacher.role === "attendance_display";
+
+  return c.html(
+    <Layout
+      title={`${classItem.code} Attendance`}
+      role="teacher"
+      userName={teacher.name}
+      teacherActiveTab={classItem.id === "__all__" ? "global-qr" : "classes"}
+      qrScript={true}
+      backHref={
+        !isDisplayRole
+          ? classItem.id === "__all__"
+            ? "/teacher/class"
+            : `/teacher/class/${classItem.id}/attendance`
+          : undefined
+      }
+      backLabel={!isDisplayRole ? "Back to stats" : undefined}
+    >
+      <div class="page-head">
+        <div class="page-copy">
+          <div class="eyebrow">{classItem.code}</div>
+          <h1>Live attendance</h1>
+          <p>
+            Keep this screen visible during class. The QR is static, but
+            each successful scan appears in the log automatically.
+          </p>
+        </div>
+        <button id="restartBtn" class="secondary" type="button">
+          Restart Session
+        </button>
+      </div>
+      <div class="live-grid">
+        <section>
+          <div class="section-head" style="margin-top: 0;">
+            <div>
+              <h2>Student scan code</h2>
+              <p>Students scan this code from their registered device.</p>
+            </div>
+          </div>
+          <div id="qr-wrap">
+            <div id="qr"></div>
+          </div>
+          <p id="scan-url" class="qr-caption"></p>
+        </section>
+        <section>
+          <div class="card">
+            <div class="muted">Session</div>
+            <div id="sessionId" class="metric">
+              Starting
+            </div>
+            <p id="status">Waiting for QR connection</p>
+          </div>
+          <div style="height: 14px;"></div>
+          <div class="card">
+            <h2>Recent scans</h2>
+            <p class="small">
+              Successful scans appear here as students mark attendance.
+            </p>
+            <div id="log" class="log-list">
+              <p data-empty-log="true">No scans yet.</p>
+            </div>
+          </div>
+        </section>
+      </div>
+      <script
+        dangerouslySetInnerHTML={{
+          __html: `
+        const classId = ${JSON.stringify(classItem.id)}
+        let ws = null
+        let statusTimer = null
+
+        async function startSession() {
+          document.getElementById('sessionId').textContent = 'Starting'
+          const res = await fetch('/api/sessions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ classId })
+          })
+          const data = await res.json()
+          if (!res.ok) throw new Error(data.error || 'Could not start attendance')
+          document.getElementById('sessionId').textContent = data.sessionId.slice(0, 8)
+          connectWs(data.sessionId)
+        }
+
+        function connectWs(sessionId) {
+          if (ws) ws.close()
+          const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
+          ws = new WebSocket(protocol + '//' + location.host + '/api/sessions/' + sessionId + '/ws')
+          ws.onmessage = (event) => {
+            const msg = JSON.parse(event.data)
+            if (msg.type === 'connected') {
+              renderQr(msg.url)
+              document.getElementById('status').textContent = 'Listening for scans...'
+              document.getElementById('status').style.color = 'var(--success)'
+            }
+            if (msg.type === 'attended') {
+              showAttended(msg.studentName, msg.alreadyMarked, msg.checkedOut, msg.className, msg.classCode)
+              appendLog(msg.studentName, msg.alreadyMarked, msg.checkedOut, msg.className, msg.classCode)
+            }
+          }
+          let reconnectDelay = 1000;
+          ws.onclose = () => {
+            setTimeout(() => { connectWs(sessionId); reconnectDelay = Math.min(reconnectDelay * 2, 30000); }, 
+                       reconnectDelay + Math.random() * 1000);
+          };
+        }
+
+        function renderQr(url) {
+          const el = document.getElementById('qr')
+          el.innerHTML = ''
+          new QRCode(el, { text: url, width: 280, height: 280, correctLevel: QRCode.CorrectLevel.H })
+          document.getElementById('scan-url').textContent = url
+        }
+
+        function showAttended(name, alreadyMarked, checkedOut, className, classCode) {
+          const status = document.getElementById('status')
+          const classInfo = classCode ? ' (' + classCode + ')' : ''
+          if (checkedOut) {
+            status.textContent = name + classInfo + ' checked out'
+          } else {
+            status.textContent = alreadyMarked ? name + classInfo + ' was already present' : name + classInfo + ' marked present'
+          }
+          clearTimeout(statusTimer)
+          statusTimer = setTimeout(() => {
+            status.textContent = 'Listening for scans...'
+          }, 3500)
+        }
+
+        function appendLog(name, alreadyMarked, checkedOut, className, classCode) {
+          const row = document.createElement('p')
+          let actionText = ' - ';
+          if (checkedOut) actionText = ' checked out - ';
+          else if (alreadyMarked) actionText = ' already present - ';
+          
+          const classInfo = classCode ? ' (' + classCode + ') ' : ''
+          row.textContent = name + classInfo + actionText + new Date().toLocaleTimeString()
+          const log = document.getElementById('log')
+          const empty = log.querySelector('[data-empty-log]')
+          if (empty) empty.remove()
+          log.prepend(row)
+        }
+
+        document.getElementById('restartBtn').addEventListener('click', () => startSession().catch(showError))
+
+        function showError(error) {
+          document.getElementById('status').textContent = error.message
+          document.getElementById('status').style.color = 'var(--danger)'
+        }
+
+        startSession().catch(showError)
+      `,
+        }}
+      />
+    </Layout>
+  );
+}
+
+
+teacherRoutes.get("/attendance/main", async (c) => {
+  const teacher = await currentTeacher(c);
+  if (!teacher) return c.redirect("/teacher/class");
+
+  const pinResponse = await requireRecentTeacherPin(c, teacher);
+  if (pinResponse) return pinResponse;
+
+  const classItem = {
+    id: "__all__",
+    code: "Main QR",
+    name: "All Classes",
+  };
+
+  return renderLiveAttendancePage(c, teacher, classItem);
+});
+
 teacherRoutes.get("/class/:classId/attendance/start", async (c) => {
   const teacher = await currentTeacher(c);
   if (!teacher) return c.redirect("/teacher/class");
@@ -905,190 +805,7 @@ teacherRoutes.get("/class/:classId/attendance/start", async (c) => {
   const pinResponse = await requireRecentTeacherPin(c, teacher);
   if (pinResponse) return pinResponse;
 
-  const isDisplayRole = teacher.role === "attendance_display";
-
-  return c.html(
-    <html>
-      <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-
-        <title>{classItem.code} Attendance</title>
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js" />
-        <style>{styles}</style>
-      </head>
-      <body>
-        <div class="shell">
-          <header class="topbar">
-            <div class="topbar-inner">
-              {isDisplayRole ? (
-                <span class="brand">Attendance Display</span>
-              ) : (
-                <a class="brand" href="/teacher/class">
-                  Attendance
-                </a>
-              )}
-              <div class="nav">
-                <span>{teacher.name}</span>
-                {!isDisplayRole ? (
-                  <a
-                    class="button secondary"
-                    href={`/teacher/class/${classItem.id}/attendance`}
-                  >
-                    Back to stats
-                  </a>
-                ) : (
-                  <form
-                    method="post"
-                    action="/teacher/logout"
-                    style="margin:0;"
-                  >
-                    <button class="secondary" type="submit">
-                      Sign out
-                    </button>
-                  </form>
-                )}
-              </div>
-            </div>
-          </header>
-          <main class="main">
-            <div class="page-head">
-              <div class="page-copy">
-                <div class="eyebrow">{classItem.code}</div>
-                <h1>Live attendance</h1>
-                <p>
-                  Keep this screen visible during class. The QR is static, but
-                  each successful scan appears in the log automatically.
-                </p>
-              </div>
-              <button id="restartBtn" class="secondary" type="button">
-                Restart Session
-              </button>
-            </div>
-            <div class="live-grid">
-              <section>
-                <div class="section-head" style="margin-top: 0;">
-                  <div>
-                    <h2>Student scan code</h2>
-                    <p>Students scan this code from their registered device.</p>
-                  </div>
-                </div>
-                <div id="qr-wrap">
-                  <div id="qr"></div>
-                </div>
-                <p id="scan-url" class="qr-caption"></p>
-              </section>
-              <section>
-                <div class="card">
-                  <div class="muted">Session</div>
-                  <div id="sessionId" class="metric">
-                    Starting
-                  </div>
-                  <p id="status">Waiting for QR connection</p>
-                </div>
-                <div style="height: 14px;"></div>
-                <div class="card">
-                  <h2>Recent scans</h2>
-                  <p class="small">
-                    Successful scans appear here as students mark attendance.
-                  </p>
-                  <div id="log" class="log-list">
-                    <p data-empty-log="true">No scans yet.</p>
-                  </div>
-                </div>
-              </section>
-            </div>
-          </main>
-        </div>
-        <script
-          dangerouslySetInnerHTML={{
-            __html: `
-          const classId = ${JSON.stringify(classItem.id)}
-          let ws = null
-          let statusTimer = null
-
-          async function startSession() {
-            document.getElementById('sessionId').textContent = 'Starting'
-            const res = await fetch('/api/sessions', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ classId })
-            })
-            const data = await res.json()
-            if (!res.ok) throw new Error(data.error || 'Could not start attendance')
-            document.getElementById('sessionId').textContent = data.sessionId.slice(0, 8)
-            connectWs(data.sessionId)
-          }
-
-          function connectWs(sessionId) {
-            if (ws) ws.close()
-            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
-            ws = new WebSocket(protocol + '//' + location.host + '/api/sessions/' + sessionId + '/ws')
-            ws.onmessage = (event) => {
-              const msg = JSON.parse(event.data)
-              if (msg.type === 'connected') {
-                renderQr(msg.url)
-                document.getElementById('status').textContent = 'Listening for scans...'
-                document.getElementById('status').style.color = 'var(--success)'
-              }
-              if (msg.type === 'attended') {
-                showAttended(msg.studentName, msg.alreadyMarked, msg.checkedOut)
-                appendLog(msg.studentName, msg.alreadyMarked, msg.checkedOut)
-              }
-            }
-            let reconnectDelay = 1000;
-            ws.onclose = () => {
-              setTimeout(() => { connectWs(sessionId); reconnectDelay = Math.min(reconnectDelay * 2, 30000); }, 
-                         reconnectDelay + Math.random() * 1000);
-            };
-          }
-
-          function renderQr(url) {
-            const el = document.getElementById('qr')
-            el.innerHTML = ''
-            new QRCode(el, { text: url, width: 280, height: 280, correctLevel: QRCode.CorrectLevel.H })
-            document.getElementById('scan-url').textContent = url
-          }
-
-          function showAttended(name, alreadyMarked, checkedOut) {
-            const status = document.getElementById('status')
-            if (checkedOut) {
-              status.textContent = name + ' checked out'
-            } else {
-              status.textContent = alreadyMarked ? name + ' was already present' : name + ' marked present'
-            }
-            clearTimeout(statusTimer)
-            statusTimer = setTimeout(() => {
-              status.textContent = 'Listening for scans...'
-            }, 3500)
-          }
-
-          function appendLog(name, alreadyMarked, checkedOut) {
-            const row = document.createElement('p')
-            let actionText = ' - ';
-            if (checkedOut) actionText = ' checked out - ';
-            else if (alreadyMarked) actionText = ' already present - ';
-            
-            row.textContent = name + actionText + new Date().toLocaleTimeString()
-            const log = document.getElementById('log')
-            const empty = log.querySelector('[data-empty-log]')
-            if (empty) empty.remove()
-            log.prepend(row)
-          }
-
-          document.getElementById('restartBtn').addEventListener('click', () => startSession().catch(showError))
-
-          function showError(error) {
-            document.getElementById('status').textContent = error.message
-            document.getElementById('status').style.color = 'var(--danger)'
-          }
-
-          startSession().catch(showError)
-        `,
-          }}
-        />
-      </body>
-    </html>,
-  );
+  return renderLiveAttendancePage(c, teacher, classItem);
 });
 
 teacherRoutes.get("/class/:classId/student/attendance", async (c) => {
@@ -1335,98 +1052,77 @@ teacherRoutes.get("/class/:classId/student/:studentId/access", async (c) => {
   const accessUrl = `${new URL(c.req.url).origin}/register?token=${encodeURIComponent(tokenPayload)}`;
 
   return c.html(
-    <html>
-      <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-
-        <title>{student.name} Access</title>
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js" />
-        <style>{styles}</style>
-      </head>
-      <body>
-        <div class="shell">
-          <header class="topbar">
-            <div class="topbar-inner">
-              <a class="brand" href="/teacher/class">
-                Attendance
-              </a>
-              <div class="nav">
-                <span>{teacher.name}</span>
-                <a
-                  class="button secondary"
-                  href={`/teacher/class/${classItem.id}/student`}
-                >
-                  Students
-                </a>
-              </div>
-            </div>
-          </header>
-          <main class="main">
-            <div class="page-head">
-              <div class="page-copy">
-                <div class="eyebrow">{classItem.code}</div>
-                <h1>Give {student.name} attendance access</h1>
-                <p>
-                  This one-time QR links the student's browser to their external
-                  student record. After it is claimed, the saved access token
-                  works until the course end date, expires after 7 idle days,
-                  and rotates after each attendance scan.
-                </p>
-              </div>
-            </div>
-            <div class="live-grid">
-              <section>
-                <div class="section-head" style="margin-top: 0;">
-                  <div>
-                    <h2>One-time access QR</h2>
-                    <p>
-                      Ask the student to scan this once on their own device.
-                    </p>
-                  </div>
-                </div>
-                <div id="qr-wrap">
-                  <div id="qr"></div>
-                </div>
-                <p id="scan-url">{accessUrl}</p>
-              </section>
-              <section class="card">
-                <div class="muted">Student</div>
-                <h2>{student.name}</h2>
-                <p>{student.email}</p>
-                <ul class="support-list">
-                  <li>QR expires in 24 hours.</li>
-                  <li>QR can only be used once to set up your session.</li>
-                  <li>
-                    Access works across all classes where this student is
-                    enrolled.
-                  </li>
-                </ul>
-                <div class="actions" style="margin-top: 16px;">
-                  <a
-                    class="button secondary"
-                    href={`/teacher/class/${classItem.id}/student/${student.id}/access`}
-                  >
-                    Create new QR
-                  </a>
-                </div>
-              </section>
-            </div>
-          </main>
+    <Layout
+      title={`${student.name} Access`}
+      role="teacher"
+      userName={teacher.name}
+      teacherActiveTab="classes"
+      qrScript={true}
+      backHref={`/teacher/class/${classItem.id}/student`}
+      backLabel="Students"
+    >
+      <div class="page-head">
+        <div class="page-copy">
+          <div class="eyebrow">{classItem.code}</div>
+          <h1>Give {student.name} attendance access</h1>
+          <p>
+            This one-time QR links the student's browser to their external
+            student record. After it is claimed, the saved access token
+            works until the course end date, expires after 7 idle days,
+            and rotates after each attendance scan.
+          </p>
         </div>
-        <script
-          dangerouslySetInnerHTML={{
-            __html: `
-          new QRCode(document.getElementById('qr'), {
-            text: ${JSON.stringify(accessUrl)},
-            width: 280,
-            height: 280,
-            correctLevel: QRCode.CorrectLevel.H
-          })
-        `,
-          }}
-        />
-      </body>
-    </html>,
+      </div>
+      <div class="live-grid">
+        <section>
+          <div class="section-head" style="margin-top: 0;">
+            <div>
+              <h2>One-time access QR</h2>
+              <p>
+                Ask the student to scan this once on their own device.
+              </p>
+            </div>
+          </div>
+          <div id="qr-wrap">
+            <div id="qr"></div>
+          </div>
+          <p id="scan-url">{accessUrl}</p>
+        </section>
+        <section class="card">
+          <div class="muted">Student</div>
+          <h2>{student.name}</h2>
+          <p>{student.email}</p>
+          <ul class="support-list">
+            <li>QR expires in 24 hours.</li>
+            <li>QR can only be used once to set up your session.</li>
+            <li>
+              Access works across all classes where this student is
+              enrolled.
+            </li>
+          </ul>
+          <div class="actions" style="margin-top: 16px;">
+            <a
+              class="button secondary"
+              href={`/teacher/class/${classItem.id}/student/${student.id}/access`}
+            >
+              Create new QR
+            </a>
+          </div>
+        </section>
+      </div>
+      <script
+        dangerouslySetInnerHTML={{
+          __html: `
+        new QRCode(document.getElementById('qr'), {
+          text: ${JSON.stringify(accessUrl)},
+          width: 280,
+          height: 280,
+          correctLevel: QRCode.CorrectLevel.H
+        })
+      `,
+        }}
+      />
+    </Layout>,
   );
 });
 // Redirects for backward compatibility (misspelled 'attendance' paths)

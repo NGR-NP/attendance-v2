@@ -86,5 +86,9 @@ CREATE TABLE IF NOT EXISTS attendance_records (
   UNIQUE(class_id, student_id, attendance_day)
 );
 
+CREATE INDEX IF NOT EXISTS idx_attendance_records_day ON attendance_records(attendance_day);
+CREATE INDEX IF NOT EXISTS idx_attendance_records_student ON attendance_records(student_id);
+
+
 -- wrangler d1 execute DB_lunar_attendance --local --file=./schema.sql
 -- wrangler d1 export DB_lunar_attendance --local --output ./local_data.sql

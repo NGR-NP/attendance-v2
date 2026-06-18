@@ -13,6 +13,8 @@ type WsMessage =
   | {
       type: "attended";
       studentName: string;
+      className?: string;
+      classCode?: string;
       alreadyMarked?: boolean;
       checkedOut?: boolean;
     }
@@ -96,15 +98,19 @@ export class AttendanceSession extends DurableObject<Env> {
     }
 
     if (url.pathname === "/attend-broadcast" && req.method === "POST") {
-      const { studentName, alreadyMarked, checkedOut } = await req.json<{
+      const { studentName, alreadyMarked, checkedOut, className, classCode } = await req.json<{
         studentName: string;
         alreadyMarked?: boolean;
         checkedOut?: boolean;
+        className?: string;
+        classCode?: string;
       }>();
 
       this.broadcast({
         type: "attended",
         studentName,
+        className,
+        classCode,
         alreadyMarked,
         checkedOut,
       });

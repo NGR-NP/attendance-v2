@@ -9,10 +9,10 @@
   "compatibility_date": "2026-05-10",
   "assets": {
     "binding": "ASSETS",
-    "directory": "./public",
+    "directory": "./public"
   },
   "observability": {
-    "enabled": true,
+    "enabled": true
   },
   "upload_source_maps": true,
   "compatibility_flags": ["nodejs_compat"],
@@ -20,38 +20,38 @@
     {
       "binding": "DB_lunar_attendance",
       "database_name": "DB_lunar_attendance",
-      "database_id": "7f06129a-b946-457c-93c4-afbe9e67ea67",
-    },
+      "database_id": "7f06129a-b946-457c-93c4-afbe9e67ea67"
+    }
   ],
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["lunarAttendance"],
-    },
+      "new_sqlite_classes": ["lunarAttendance"]
+    }
   ],
   "durable_objects": {
     "bindings": [
       {
         "name": "durable_objects_lunar_attendance",
-        "class_name": "lunarAttendance",
-      },
-    ],
+        "class_name": "lunarAttendance"
+      }
+    ]
   },
   "kv_namespaces": [
     {
       "binding": "KV_lunar_attendance",
-      "id": "00089b57c2ba450d8a3f961364425f16",
-    },
+      "id": "00089b57c2ba450d8a3f961364425f16"
+    }
   ],
   "dev": {
-    "ip": "127.0.0.1",
+    "ip": "127.0.0.1"
   },
   "vars": {
     "EXTERNAL_API": "https://lunar.tejbahadurkarki.name.np/external",
     "APP_URL": "https://lunar.tejbahadurkarki.name.np",
     "QR_SECRET": "fjasdfkajsdfksdfeuhfalds",
-    "ADMIN_SECRET": "supersecurepassword-",
-  },
+    "ADMIN_SECRET": "supersecurepassword-"
+  }
   /**
    * Smart Placement
    * https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement
