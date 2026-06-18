@@ -376,7 +376,7 @@ app.post("/api/attend", async (c) => {
   if (wifiDecision.configured) {
     if (!wifiDecision.allowed) {
       return c.json(
-        { error: "Please connect to an approved Wi-Fi network" },
+        { error: "Please connect to an approved Wi-Fi network, you ip is "+studentIp },
         403,
       );
     }
