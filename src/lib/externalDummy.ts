@@ -1179,3 +1179,109 @@ export async function listAttendanceForDay(
   }));
 }
 
+// ── Attendance History (filtered, paginated) ──────────────────────────
+
+export interface AttendanceHistoryRecord extends TodayAttendanceRecord {
+  day: string;
+}
+
+export interface AttendanceHistoryFilters {
+  classId?: string;
+  from?: string;
+  to?: string;
+  q?: string;
+  teacherId?: string;
+  sort?: "day" | "student" | "class";
+  dir?: "asc" | "desc";
+  limit?: number;
+  offset?: number;
+}
+
+const HISTORY_SORT_COLUMNS: Record<string, string> = {
+  day: "r.attended_at",
+  student: "r.student_name",
+  class: "c.code",
+};
+
+export async function listAttendanceHistory(
+  db: D1Database,
+  filters: AttendanceHistoryFilters,
+): Promise<{ records: AttendanceHistoryRecord[]; total: number }> {
+  const where: string[] = [];
+  const params: (string | number)[] = [];
+
+  if (filters.teacherId) {
+    where.push(
+      `EXISTS (SELECT 1 FROM teacher_classes tc WHERE tc.class_id = r.class_id AND tc.teacher_id = ?)`,
+    );
+    params.push(filters.teacherId);
+  }
+  if (filters.from) {
+    where.push(`r.attendance_day >= ?`);
+    params.push(filters.from);
+  }
+  if (filters.to) {
+    where.push(`r.attendance_day <= ?`);
+    params.push(filters.to);
+  }
+  if (filters.classId) {
+    where.push(`r.class_id = ?`);
+    params.push(filters.classId);
+  }
+  if (filters.q) {
+    const needle = `%${filters.q.toLowerCase()}%`;
+    where.push(
+      `(lower(r.student_name) LIKE ? OR lower(r.student_id) LIKE ?)`,
+    );
+    params.push(needle, needle);
+  }
+
+  const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const sortCol =
+    HISTORY_SORT_COLUMNS[filters.sort ?? "day"] ?? HISTORY_SORT_COLUMNS.day;
+  const dir = filters.dir === "asc" ? "ASC" : "DESC";
+  const limit = Math.min(Math.max(filters.limit ?? 50, 1), 200);
+  const offset = Math.max(filters.offset ?? 0, 0);
+
+  const totalRow = await db
+    .prepare(
+      `SELECT COUNT(*) AS total
+         FROM attendance_records r
+         JOIN classes c ON c.id = r.class_id
+         ${whereSql}`,
+    )
+    .bind(...params)
+    .first<{ total: number }>();
+  const total = totalRow?.total ?? 0;
+
+  const { results } = await db
+    .prepare(
+      `SELECT r.id,
+              r.student_name   AS studentName,
+              r.student_id     AS studentId,
+              c.name           AS className,
+              c.code           AS classCode,
+              r.class_id       AS classId,
+              r.attendance_day AS day,
+              time(r.attended_at, 'unixepoch', '+5 hours', '+45 minutes') AS time,
+              CASE WHEN r.checked_out_at IS NOT NULL THEN time(r.checked_out_at, 'unixepoch', '+5 hours', '+45 minutes') END AS checkoutTime,
+              CASE WHEN r.checked_out_at IS NOT NULL THEN r.checked_out_at - r.attended_at ELSE NULL END AS durationSeconds,
+              r.device_type    AS deviceType,
+              r.country
+         FROM attendance_records r
+         JOIN classes c ON c.id = r.class_id
+         ${whereSql}
+        ORDER BY ${sortCol} ${dir}, r.attended_at DESC
+        LIMIT ? OFFSET ?`,
+    )
+    .bind(...params, limit, offset)
+    .all<AttendanceHistoryRecord & { durationSeconds: number | null }>();
+
+  const records = (results ?? []).map((row) => ({
+    ...row,
+    duration: formatDuration(row.durationSeconds ?? null),
+  })) as AttendanceHistoryRecord[];
+
+  return { records, total };
+}
+

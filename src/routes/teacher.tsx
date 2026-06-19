@@ -19,6 +19,7 @@ import {
   listClassAttendanceDays,
   listStudentAttendanceSummaries,
   listStudentAttendanceRecords,
+  listAttendanceHistory,
   getClassStudent as getClassStudentHelper,
 } from "../lib/externalDummy";
 import { localDateKey, SQLITE_LOCALTIME_MODIFIER } from "../lib/date";
@@ -724,7 +725,7 @@ function renderLiveAttendancePage(
           }
           let reconnectDelay = 1000;
           ws.onclose = () => {
-            setTimeout(() => { connectWs(sessionId); reconnectDelay = Math.min(reconnectDelay * 2, 30000); }, 
+            setTimeout(() => { connectWs(sessionId); reconnectDelay = Math.min(reconnectDelay * 2, 30000); },
                        reconnectDelay + Math.random() * 1000);
           };
         }
@@ -755,7 +756,7 @@ function renderLiveAttendancePage(
           let actionText = ' - ';
           if (checkedOut) actionText = ' checked out - ';
           else if (alreadyMarked) actionText = ' already present - ';
-          
+
           const classInfo = classCode ? ' (' + classCode + ') ' : ''
           row.textContent = name + classInfo + actionText + new Date().toLocaleTimeString()
           const log = document.getElementById('log')
@@ -1146,5 +1147,308 @@ teacherRoutes.get("/class/:classId/student/attendance", (c) => {
 teacherRoutes.get("/class/:classId/student/:studentId/attendance", (c) => {
   return c.redirect(
     `/teacher/class/${c.req.param("classId")}/student/${c.req.param("studentId")}/attendance`,
+  );
+});
+
+// ── Attendance History (teacher-scoped, filterable, paginated) ─────────
+teacherRoutes.get("/attendance/history", async (c) => {
+  const teacher = await currentTeacher(c);
+  if (!teacher) return c.redirect("/teacher/login");
+
+  const today = localDateKey();
+  const dt = new Date(`${today}T00:00:00Z`);
+  dt.setUTCDate(dt.getUTCDate() - 29);
+  const defaultFrom = dt.toISOString().split("T")[0];
+
+  const from = c.req.query("from") || defaultFrom;
+  const to = c.req.query("to") || today;
+  const classId = c.req.query("class") || "";
+  const q = c.req.query("q") || "";
+  const sortRaw = c.req.query("sort") || "day";
+  const dirRaw = c.req.query("dir") || "desc";
+  const page = Math.max(parseInt(c.req.query("page") || "1", 10) || 1, 1);
+  const pageSize = 50;
+  const offset = (page - 1) * pageSize;
+
+  const sort: "day" | "student" | "class" =
+    sortRaw === "student" || sortRaw === "class" ? sortRaw : "day";
+  const dir: "asc" | "desc" = dirRaw === "asc" ? "asc" : "desc";
+
+  const [teacherClasses, { records, total }] = await Promise.all([
+    listTeacherClasses(c.env.DB_lunar_attendance, teacher.id),
+    listAttendanceHistory(c.env.DB_lunar_attendance, {
+      teacherId: teacher.id,
+      from,
+      to,
+      classId: classId || undefined,
+      q: q || undefined,
+      sort,
+      dir,
+      limit: pageSize,
+      offset,
+    }),
+  ]);
+
+  const totalPages = Math.max(Math.ceil(total / pageSize), 1);
+  const startRow = total === 0 ? 0 : offset + 1;
+  const endRow = Math.min(offset + records.length, total);
+
+  function withParams(overrides: Record<string, string | undefined>) {
+    const params = new URLSearchParams();
+    const merged: Record<string, string> = {
+      from,
+      to,
+      class: classId,
+      q,
+      sort,
+      dir,
+      page: String(page),
+    };
+    for (const [k, v] of Object.entries(overrides)) {
+      if (v === undefined) continue;
+      merged[k] = v;
+    }
+    if (merged.from && merged.from !== defaultFrom) params.set("from", merged.from);
+    if (merged.to && merged.to !== today) params.set("to", merged.to);
+    if (merged.class) params.set("class", merged.class);
+    if (merged.q) params.set("q", merged.q);
+    if (merged.sort && merged.sort !== "day") params.set("sort", merged.sort);
+    if (merged.dir && merged.dir !== "desc") params.set("dir", merged.dir);
+    if (merged.page && merged.page !== "1") params.set("page", merged.page);
+    const s = params.toString();
+    return s ? `/teacher/attendance/history?${s}` : "/teacher/attendance/history";
+  }
+
+  function sortLink(col: "day" | "student" | "class", label: string) {
+    const active = sort === col;
+    const nextDir: "asc" | "desc" = active && dir === "desc" ? "asc" : "desc";
+    const arrow = active ? (dir === "desc" ? " ↓" : " ↑") : "";
+    return (
+      <a
+        href={withParams({ sort: col, dir: nextDir, page: "1" })}
+        style={`color: inherit; text-decoration: none; ${active ? "color: var(--primary);" : ""}`}
+      >
+        {label}
+        {arrow}
+      </a>
+    );
+  }
+
+  return c.html(
+    <Layout
+      role="teacher"
+      title="Attendance History"
+      teacherActiveTab="history"
+      userName={teacher.name}
+    >
+      <div style="margin-bottom: 1.5rem;">
+        <div class="eyebrow">Records</div>
+        <h1 style="margin: 0 0 0.4rem;">Attendance History</h1>
+        <p class="subtitle">
+          Search across your assigned classes and date ranges. Defaults to the last 30 days.
+        </p>
+      </div>
+
+      {/* ── Filters ── */}
+      <form
+        method="get"
+        action="/teacher/attendance/history"
+        style="
+          display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)) auto;
+          gap: 0.75rem; align-items: end;
+          padding: 1rem 1.25rem; margin-bottom: 1.5rem;
+          background: var(--surface); border: 1px solid var(--line);
+          border-radius: var(--rounded-lg); box-shadow: var(--shadow-sm);
+        "
+      >
+        <div>
+          <label
+            for="history-from"
+            style="display: block; font-size: 0.72rem; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.35rem;"
+          >
+            From
+          </label>
+          <input
+            id="history-from"
+            type="date"
+            name="from"
+            value={from}
+            max={to}
+            style="
+              width: 100%; padding: 0.55rem 0.75rem;
+              border: 1px solid var(--line); border-radius: var(--rounded-md);
+              font-family: inherit; font-size: 0.9rem; background: var(--bg); color: var(--ink);
+            "
+          />
+        </div>
+        <div>
+          <label
+            for="history-to"
+            style="display: block; font-size: 0.72rem; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.35rem;"
+          >
+            To
+          </label>
+          <input
+            id="history-to"
+            type="date"
+            name="to"
+            value={to}
+            min={from}
+            max={today}
+            style="
+              width: 100%; padding: 0.55rem 0.75rem;
+              border: 1px solid var(--line); border-radius: var(--rounded-md);
+              font-family: inherit; font-size: 0.9rem; background: var(--bg); color: var(--ink);
+            "
+          />
+        </div>
+        <div>
+          <label
+            for="history-class"
+            style="display: block; font-size: 0.72rem; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.35rem;"
+          >
+            Class
+          </label>
+          <select
+            id="history-class"
+            name="class"
+            style="
+              width: 100%; padding: 0.55rem 0.75rem;
+              border: 1px solid var(--line); border-radius: var(--rounded-md);
+              font-family: inherit; font-size: 0.9rem; background: var(--bg); color: var(--ink);
+            "
+          >
+            <option value="" selected={!classId}>All my classes</option>
+            {teacherClasses.map((cls) => (
+              <option value={cls.id} selected={cls.id === classId}>
+                {cls.code} — {cls.name}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label
+            for="history-q"
+            style="display: block; font-size: 0.72rem; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.35rem;"
+          >
+            Student
+          </label>
+          <input
+            id="history-q"
+            type="search"
+            name="q"
+            value={q}
+            placeholder="Name or ID"
+            autocomplete="off"
+            style="
+              width: 100%; padding: 0.55rem 0.75rem;
+              border: 1px solid var(--line); border-radius: var(--rounded-md);
+              font-family: inherit; font-size: 0.9rem; background: var(--bg); color: var(--ink);
+            "
+          />
+        </div>
+        <div style="display: flex; gap: 0.5rem;">
+          <button type="submit" class="button">Apply</button>
+          <a href="/teacher/attendance/history" class="button secondary">Reset</a>
+        </div>
+      </form>
+
+      {/* ── Summary ── */}
+      <div
+        style="
+          display: flex; align-items: center; justify-content: space-between;
+          margin-bottom: 0.75rem; font-size: 0.85rem; color: var(--muted);
+        "
+      >
+        <div>
+          {total === 0
+            ? "No records match these filters."
+            : `Showing ${startRow}–${endRow} of ${total} records`}
+        </div>
+      </div>
+
+      {/* ── Table ── */}
+      {records.length === 0 ? (
+        <div class="empty-state">
+          <p>No attendance records found for the selected filters.</p>
+        </div>
+      ) : (
+        <div class="table-container">
+          <table>
+            <thead style="position: sticky; top: 0; background: var(--surface); z-index: 1;">
+              <tr>
+                <th>{sortLink("day", "Date")}</th>
+                <th>Time</th>
+                <th>{sortLink("student", "Student")}</th>
+                <th>{sortLink("class", "Class")}</th>
+                <th>Check-out</th>
+                <th>Duration</th>
+                <th>Device</th>
+                <th>Country</th>
+              </tr>
+            </thead>
+            <tbody>
+              {records.map((r) => (
+                <tr>
+                  <td style="font-variant-numeric: tabular-nums;">{r.day}</td>
+                  <td>
+                    <span class="time-badge">{r.time}</span>
+                  </td>
+                  <td>
+                    <div class="cell-name">{r.studentName}</div>
+                    <div class="cell-sub">{r.studentId}</div>
+                  </td>
+                  <td>
+                    <a
+                      class="class-tag"
+                      href={`/teacher/class/${r.classId}/attendance`}
+                    >
+                      {r.classCode}
+                    </a>
+                    <div class="cell-sub">{r.className}</div>
+                  </td>
+                  <td>{r.checkoutTime ?? "—"}</td>
+                  <td>{r.duration ?? "—"}</td>
+                  <td>
+                    <span class="device-pill">{r.deviceType ?? "unknown"}</span>
+                  </td>
+                  <td>{r.country ?? "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* ── Pagination ── */}
+      {totalPages > 1 && (
+        <div
+          style="
+            display: flex; align-items: center; justify-content: center; gap: 0.5rem;
+            margin-top: 1.5rem;
+          "
+        >
+          <a
+            href={withParams({ page: String(Math.max(page - 1, 1)) })}
+            class="button secondary"
+            aria-disabled={page === 1 ? "true" : undefined}
+            style={page === 1 ? "pointer-events: none; opacity: 0.5;" : ""}
+          >
+            ← Previous
+          </a>
+          <span style="font-size: 0.85rem; color: var(--muted); padding: 0 0.75rem;">
+            Page {page} of {totalPages}
+          </span>
+          <a
+            href={withParams({ page: String(Math.min(page + 1, totalPages)) })}
+            class="button secondary"
+            aria-disabled={page === totalPages ? "true" : undefined}
+            style={page === totalPages ? "pointer-events: none; opacity: 0.5;" : ""}
+          >
+            Next →
+          </a>
+        </div>
+      )}
+    </Layout>,
   );
 });

@@ -30,6 +30,7 @@ import {
   listStudentAttendanceSummaries,
   getAdminStats,
   listAttendanceForDay,
+  listAttendanceHistory,
 } from "../lib/externalDummy";
 import { signAdminToken, verifyAdminToken, ADMIN_COOKIE } from "../lib/auth";
 import { Layout } from "../components/Layout";
@@ -51,6 +52,32 @@ function boundedText(value: unknown, maxLength: number) {
     .replace(/[\u0000-\u001f\u007f]/g, "")
     .trim()
     .slice(0, maxLength);
+}
+
+// ── Date helpers (shared by attendance views) ────────────────────────
+function getDateOffset(date: string, offset: number): string {
+  const [y, m, d] = date.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + offset);
+  return dt.toISOString().split("T")[0];
+}
+
+function formatDisplayDate(date: string): string {
+  const [y, m, d] = date.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.toLocaleDateString("en-US", {
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+}
+
+function relativeLabel(date: string, today: string): string | null {
+  if (date === today) return "Today";
+  if (date === getDateOffset(today, -1)) return "Yesterday";
+  if (date === getDateOffset(today, 1)) return "Tomorrow";
+  return null;
 }
 // ── Login page ───────────────────────────────────────────────────────
 function loginPage(c: AppContext, error?: string) {
@@ -598,14 +625,23 @@ adminRoutes.get("/classes", async (c) => {
                   </button>
                 </form>
               </div>
-              <h2 style="margin: 0.5rem 0 1.5rem;">{cls.name}</h2>
-              <a
-                href={`/admin/classes/${cls.id}`}
-                class="btn btn-secondary"
-                style="width: 100%;"
-              >
-                Manage Roster →
-              </a>
+              <h2 style="margin: 0.5rem 0 1.25rem;">{cls.name}</h2>
+              <div style="display: flex; flex-direction: column; gap: 0.5rem;">
+                <a
+                  href={`/admin/classes/${cls.id}/attendance`}
+                  class="btn btn-primary"
+                  style="width: 100%;"
+                >
+                  View Attendance →
+                </a>
+                <a
+                  href={`/admin/classes/${cls.id}`}
+                  class="btn btn-secondary"
+                  style="width: 100%;"
+                >
+                  Manage Roster
+                </a>
+              </div>
             </div>
           ))}
         </div>
@@ -1355,11 +1391,35 @@ adminRoutes.get("/attendance/export", async (c) => {
 // admin_session cookie (Path=/admin). Do NOT move it to a shared router.
 adminRoutes.get("/attendance/today", async (c) => {
   const today = localDateKey();
-  const records = await listAttendanceForDay(c.env.DB_lunar_attendance, today);
+  const selectedDate = c.req.query("date") || today;
+  const selectedClassId = c.req.query("class") || "";
+  const isToday = selectedDate === today;
+  const prevDate = getDateOffset(selectedDate, -1);
+  const nextDate = getDateOffset(selectedDate, 1);
+  const displayDate = formatDisplayDate(selectedDate);
+  const relLabel = relativeLabel(selectedDate, today);
+
+  const [allClasses, dayRecords] = await Promise.all([
+    listAllClasses(c.env.DB_lunar_attendance),
+    listAttendanceForDay(c.env.DB_lunar_attendance, selectedDate),
+  ]);
+  const records = selectedClassId
+    ? dayRecords.filter((r) => r.classId === selectedClassId)
+    : dayRecords;
 
   const uniqueStudents = new Set(records.map((r) => r.studentId)).size;
   const uniqueClasses = new Set(records.map((r) => r.classId)).size;
   const totalCount = records.length;
+
+  function withParams(overrides: Record<string, string | undefined>) {
+    const params = new URLSearchParams();
+    const date = overrides.date ?? selectedDate;
+    if (date && date !== today) params.set("date", date);
+    const cls = overrides.class ?? selectedClassId;
+    if (cls) params.set("class", cls);
+    const q = params.toString();
+    return q ? `/admin/attendance/today?${q}` : "/admin/attendance/today";
+  }
 
   const searchScript = `
 (function () {
@@ -1384,33 +1444,161 @@ adminRoutes.get("/attendance/today", async (c) => {
 }());
 `;
 
+  const datePickerScript = `
+(function () {
+  var trigger = document.getElementById('date-trigger');
+  var picker = document.getElementById('date-picker');
+  if (!trigger || !picker) return;
+  trigger.addEventListener('click', function () {
+    if (typeof picker.showPicker === 'function') {
+      try { picker.showPicker(); return; } catch (e) {}
+    }
+    picker.focus();
+    picker.click();
+  });
+  picker.addEventListener('change', function () {
+    if (!picker.value) return;
+    var url = new URL(window.location.href);
+    url.searchParams.set('date', picker.value);
+    window.location.href = url.toString();
+  });
+}());
+`;
+
+  const classFilterScript = `
+(function () {
+  var sel = document.getElementById('class-filter');
+  if (!sel) return;
+  sel.addEventListener('change', function () {
+    var url = new URL(window.location.href);
+    if (sel.value) url.searchParams.set('class', sel.value);
+    else url.searchParams.delete('class');
+    window.location.href = url.toString();
+  });
+}());
+`;
+
   return layout(
     c,
     "Today's Attendance",
     "today",
     <>
-      <div style="margin-bottom: 2rem;">
-        <div style="font-size: 0.72rem; font-weight: 800; color: var(--primary); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.4rem;">Live feed</div>
-        <div class="flex-between" style="align-items: flex-start; gap: 1rem;">
-          <div>
-            <h1 style="margin: 0 0 0.4rem;">Today's Attendance</h1>
-            <p class="text-muted" style="margin: 0; font-size: 0.9rem;">
-              All student check-ins recorded today across every class.
-            </p>
-          </div>
-          <span
+      <div style="margin-bottom: 1.5rem;">
+        <div style="font-size: 0.72rem; font-weight: 800; color: var(--primary); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.4rem;">
+          {isToday ? "Live feed" : "Historical view"}
+        </div>
+        <h1 style="margin: 0 0 0.4rem;">Attendance Records</h1>
+        <p class="text-muted" style="margin: 0; font-size: 0.9rem;">
+          {isToday
+            ? "All student check-ins recorded today across every class."
+            : `Reviewing attendance recorded on ${displayDate}.`}
+        </p>
+      </div>
+
+      {/* ── Date navigation ── */}
+      <div
+        style="
+          display: flex; align-items: center; justify-content: center; gap: 0.75rem;
+          margin-bottom: 1.25rem; padding: 0.6rem 0.9rem;
+          background: var(--surface); border: 1px solid var(--line);
+          border-radius: var(--rounded-lg); box-shadow: var(--shadow-sm);
+          position: relative;
+        "
+      >
+        <a
+          href={withParams({ date: prevDate })}
+          class="btn btn-secondary btn-icon"
+          aria-label="Previous day"
+          style="padding: 0.5rem 0.85rem; line-height: 1;"
+        >
+          ‹
+        </a>
+        <button
+          id="date-trigger"
+          type="button"
+          aria-label="Open calendar"
+          style="
+            display: inline-flex; align-items: center; gap: 0.5rem;
+            min-width: 240px; justify-content: center;
+            padding: 0.55rem 1.1rem; border-radius: var(--rounded-md);
+            background: transparent; border: 1px solid transparent;
+            font-family: inherit; font-size: 1rem; font-weight: 800;
+            color: var(--ink); cursor: pointer;
+            font-variant-numeric: tabular-nums;
+          "
+        >
+          <span>{displayDate}</span>
+          {relLabel && (
+            <span
+              style="
+                font-size: 0.72rem; font-weight: 700;
+                padding: 0.15rem 0.55rem; border-radius: 99px;
+                background: var(--primary-soft); color: var(--primary-hover);
+                text-transform: uppercase; letter-spacing: 0.05em;
+              "
+            >
+              {relLabel}
+            </span>
+          )}
+        </button>
+        <input
+          id="date-picker"
+          type="date"
+          value={selectedDate}
+          max={today}
+          style="
+            position: absolute; opacity: 0; pointer-events: none;
+            inset: 0; width: 1px; height: 1px;
+          "
+        />
+        <a
+          href={withParams({ date: nextDate })}
+          class="btn btn-secondary btn-icon"
+          aria-label="Next day"
+          style="padding: 0.5rem 0.85rem; line-height: 1;"
+          aria-disabled={nextDate > today ? "true" : undefined}
+        >
+          ›
+        </a>
+      </div>
+
+      {/* ── Class filter ── */}
+      {allClasses.length > 0 && (
+        <div
+          style="
+            display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;
+            margin-bottom: 1.5rem; font-size: 0.85rem; color: var(--muted);
+          "
+        >
+          <label for="class-filter" style="font-weight: 700; color: var(--ink);">
+            Class
+          </label>
+          <select
+            id="class-filter"
             style="
-              flex-shrink: 0; padding: 0.5rem 1.2rem;
-              background: linear-gradient(135deg, var(--primary), #f59e0b);
-              color: white; border-radius: 99px; font-size: 0.85rem;
-              font-weight: 700; white-space: nowrap;
-              box-shadow: 0 4px 12px rgba(217,119,6,0.3);
+              padding: 0.5rem 0.85rem; border: 1px solid var(--line);
+              border-radius: var(--rounded-md); background: var(--surface);
+              font-family: inherit; font-size: 0.9rem; color: var(--ink);
+              min-width: 220px;
             "
           >
-            {today}
-          </span>
+            <option value="" selected={!selectedClassId}>All classes</option>
+            {allClasses.map((cls) => (
+              <option
+                value={cls.id}
+                selected={cls.id === selectedClassId}
+              >
+                {cls.code} — {cls.name}
+              </option>
+            ))}
+          </select>
+          {selectedClassId && (
+            <a href={withParams({ class: "" })} class="btn btn-ghost">
+              Clear filter
+            </a>
+          )}
         </div>
-      </div>
+      )}
 
       {/* ── Stat cards ── */}
       <div class="grid" style="margin-bottom: 2rem;">
@@ -1435,7 +1623,6 @@ adminRoutes.get("/attendance/today", async (c) => {
           background: white; border: 1px solid var(--line);
           border-radius: var(--rounded-xl); padding: 0 1rem;
           margin-bottom: 1.5rem; box-shadow: var(--shadow-sm);
-          transition: border-color 0.2s, box-shadow 0.2s;
         "
       >
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: var(--muted); flex-shrink:0;">
@@ -1460,7 +1647,9 @@ adminRoutes.get("/attendance/today", async (c) => {
       {/* ── Table or empty state ── */}
       {records.length === 0 ? (
         <div class="empty-state">
-          No attendance check-ins recorded yet today. Start a class QR session to see records here.
+          {isToday
+            ? "No attendance check-ins recorded yet today. Start a class QR session to see records here."
+            : "No attendance recorded for this date."}
         </div>
       ) : (
         <div class="table-container">
@@ -1470,6 +1659,8 @@ adminRoutes.get("/attendance/today", async (c) => {
                 <th>Time</th>
                 <th>Student</th>
                 <th>Class</th>
+                <th>Check-out</th>
+                <th>Duration</th>
                 <th>Device</th>
                 <th>Country</th>
               </tr>
@@ -1491,7 +1682,7 @@ adminRoutes.get("/attendance/today", async (c) => {
                   </td>
                   <td>
                     <a
-                      href={`/admin/classes/${r.classId}`}
+                      href={`/admin/classes/${r.classId}/attendance`}
                       class="badge badge-primary"
                       style="text-decoration: none; margin-bottom: 0.2rem; display: inline-block;"
                     >
@@ -1515,6 +1706,786 @@ adminRoutes.get("/attendance/today", async (c) => {
       )}
 
       <script dangerouslySetInnerHTML={{ __html: searchScript }} />
+      <script dangerouslySetInnerHTML={{ __html: datePickerScript }} />
+      <script dangerouslySetInnerHTML={{ __html: classFilterScript }} />
     </>,
+  );
+});
+
+// ── Per-class attendance dashboard ────────────────────────────────────
+adminRoutes.get("/classes/:id/attendance", async (c) => {
+  const classId = c.req.param("id");
+  const cls = await getClassFull(c.env.DB_lunar_attendance, classId);
+  if (!cls) return c.text("Class not found", 404);
+
+  const today = localDateKey();
+  const selectedDate = c.req.query("date") || today;
+  const isToday = selectedDate === today;
+  const prevDate = getDateOffset(selectedDate, -1);
+  const nextDate = getDateOffset(selectedDate, 1);
+  const displayDate = formatDisplayDate(selectedDate);
+  const relLabel = relativeLabel(selectedDate, today);
+
+  const dayRecords = await listAttendanceForDay(
+    c.env.DB_lunar_attendance,
+    selectedDate,
+  );
+  const records = dayRecords.filter((r) => r.classId === classId);
+  const totalCount = records.length;
+  const uniqueStudents = new Set(records.map((r) => r.studentId)).size;
+
+  function withParams(overrides: Record<string, string | undefined>) {
+    const params = new URLSearchParams();
+    const date = overrides.date ?? selectedDate;
+    if (date && date !== today) params.set("date", date);
+    const q = params.toString();
+    return q
+      ? `/admin/classes/${classId}/attendance?${q}`
+      : `/admin/classes/${classId}/attendance`;
+  }
+
+  const searchScript = `
+(function () {
+  var input = document.getElementById('class-search');
+  var countEl = document.getElementById('class-count');
+  var rows = Array.from(document.querySelectorAll('#class-att-table tbody tr'));
+  var total = rows.length;
+  if (!input) return;
+  input.addEventListener('input', function () {
+    var q = input.value.trim().toLowerCase();
+    var visible = 0;
+    rows.forEach(function (row) {
+      var text = (row.dataset.search || '').toLowerCase();
+      var match = !q || text.includes(q);
+      row.style.display = match ? '' : 'none';
+      if (match) visible++;
+    });
+    if (countEl) countEl.textContent = q
+      ? visible + ' of ' + total + ' records'
+      : total + ' record' + (total === 1 ? '' : 's');
+  });
+}());
+`;
+
+  const datePickerScript = `
+(function () {
+  var trigger = document.getElementById('date-trigger');
+  var picker = document.getElementById('date-picker');
+  if (!trigger || !picker) return;
+  trigger.addEventListener('click', function () {
+    if (typeof picker.showPicker === 'function') {
+      try { picker.showPicker(); return; } catch (e) {}
+    }
+    picker.focus();
+    picker.click();
+  });
+  picker.addEventListener('change', function () {
+    if (!picker.value) return;
+    var url = new URL(window.location.href);
+    url.searchParams.set('date', picker.value);
+    window.location.href = url.toString();
+  });
+}());
+`;
+
+  return layout(
+    c,
+    `${cls.code} Attendance`,
+    "classes",
+    <>
+      <div class="flex-between" style="margin-bottom: 1.5rem; gap: 1rem;">
+        <div class="gap-2">
+          <a
+            href="/admin/classes"
+            class="btn btn-secondary btn-icon"
+            title="Back to Classes"
+            style="margin-right: 0.5rem;"
+          >
+            <IconBack />
+          </a>
+          <div>
+            <div style="font-size: 0.72rem; font-weight: 800; color: var(--primary); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.3rem;">
+              Class attendance
+            </div>
+            <h1 style="margin: 0;">
+              {cls.name}{" "}
+              <span class="badge badge-primary" style="vertical-align: middle; margin-left: 0.5rem;">
+                {cls.code}
+              </span>
+            </h1>
+          </div>
+        </div>
+        <a
+          href={`/admin/classes/${classId}`}
+          class="btn btn-secondary"
+        >
+          Manage Roster →
+        </a>
+      </div>
+
+      {/* ── Date navigation ── */}
+      <div
+        style="
+          display: flex; align-items: center; justify-content: center; gap: 0.75rem;
+          margin-bottom: 1.5rem; padding: 0.6rem 0.9rem;
+          background: var(--surface); border: 1px solid var(--line);
+          border-radius: var(--rounded-lg); box-shadow: var(--shadow-sm);
+          position: relative;
+        "
+      >
+        <a
+          href={withParams({ date: prevDate })}
+          class="btn btn-secondary btn-icon"
+          aria-label="Previous day"
+          style="padding: 0.5rem 0.85rem; line-height: 1;"
+        >
+          ‹
+        </a>
+        <button
+          id="date-trigger"
+          type="button"
+          aria-label="Open calendar"
+          style="
+            display: inline-flex; align-items: center; gap: 0.5rem;
+            min-width: 240px; justify-content: center;
+            padding: 0.55rem 1.1rem; border-radius: var(--rounded-md);
+            background: transparent; border: 1px solid transparent;
+            font-family: inherit; font-size: 1rem; font-weight: 800;
+            color: var(--ink); cursor: pointer;
+            font-variant-numeric: tabular-nums;
+          "
+        >
+          <span>{displayDate}</span>
+          {relLabel && (
+            <span
+              style="
+                font-size: 0.72rem; font-weight: 700;
+                padding: 0.15rem 0.55rem; border-radius: 99px;
+                background: var(--primary-soft); color: var(--primary-hover);
+                text-transform: uppercase; letter-spacing: 0.05em;
+              "
+            >
+              {relLabel}
+            </span>
+          )}
+        </button>
+        <input
+          id="date-picker"
+          type="date"
+          value={selectedDate}
+          max={today}
+          style="
+            position: absolute; opacity: 0; pointer-events: none;
+            inset: 0; width: 1px; height: 1px;
+          "
+        />
+        <a
+          href={withParams({ date: nextDate })}
+          class="btn btn-secondary btn-icon"
+          aria-label="Next day"
+          style="padding: 0.5rem 0.85rem; line-height: 1;"
+          aria-disabled={nextDate > today ? "true" : undefined}
+        >
+          ›
+        </a>
+      </div>
+
+      {/* ── Stats ── */}
+      <div class="grid" style="margin-bottom: 2rem;">
+        <div class="stat-card">
+          <div class="stat-label">Check-ins</div>
+          <div class="stat-value">{totalCount}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Unique students</div>
+          <div class="stat-value">{uniqueStudents}</div>
+        </div>
+      </div>
+
+      {/* ── Search ── */}
+      <div
+        style="
+          display: flex; align-items: center; gap: 0.75rem;
+          background: white; border: 1px solid var(--line);
+          border-radius: var(--rounded-xl); padding: 0 1rem;
+          margin-bottom: 1.5rem; box-shadow: var(--shadow-sm);
+        "
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: var(--muted); flex-shrink:0;">
+          <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+        </svg>
+        <input
+          id="class-search"
+          type="search"
+          placeholder="Search by student name…"
+          autocomplete="off"
+          style="
+            flex: 1; border: none; outline: none; background: transparent;
+            padding: 0.85rem 0; font-family: inherit; font-size: 0.95rem;
+            color: var(--ink);
+          "
+        />
+        <span id="class-count" style="color: var(--muted); font-size: 0.78rem; font-weight: 700; white-space: nowrap; flex-shrink: 0;">
+          {totalCount} record{totalCount === 1 ? "" : "s"}
+        </span>
+      </div>
+
+      {/* ── Table or empty state ── */}
+      {records.length === 0 ? (
+        <div class="empty-state">
+          {isToday
+            ? "No attendance check-ins recorded yet today for this class."
+            : "No attendance recorded for this class on this date."}
+        </div>
+      ) : (
+        <div class="table-container">
+          <table id="class-att-table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Student</th>
+                <th>Check-out</th>
+                <th>Duration</th>
+                <th>Device</th>
+                <th>Country</th>
+              </tr>
+            </thead>
+            <tbody>
+              {records.map((r) => (
+                <tr data-search={`${r.studentName} ${r.studentId}`.toLowerCase()}>
+                  <td>
+                    <span class="badge badge-primary" style="font-variant-numeric: tabular-nums;">
+                      {r.time}
+                    </span>
+                  </td>
+                  <td>
+                    <div class="font-semibold">{r.studentName}</div>
+                    <div class="text-muted text-sm">{r.studentId}</div>
+                  </td>
+                  <td>{r.checkoutTime ?? "—"}</td>
+                  <td>{r.duration ?? "—"}</td>
+                  <td>
+                    <span class="text-sm" style="text-transform: capitalize;">
+                      {r.deviceType ?? "unknown"}
+                    </span>
+                  </td>
+                  <td>{r.country ?? "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <script dangerouslySetInnerHTML={{ __html: searchScript }} />
+      <script dangerouslySetInnerHTML={{ __html: datePickerScript }} />
+    </>,
+  );
+});
+
+// ── Attendance History (all classes, filterable, paginated) ───────────
+adminRoutes.get("/attendance/history", async (c) => {
+  const today = localDateKey();
+  const defaultFrom = getDateOffset(today, -29);
+
+  const from = c.req.query("from") || defaultFrom;
+  const to = c.req.query("to") || today;
+  const classId = c.req.query("class") || "";
+  const q = c.req.query("q") || "";
+  const sortRaw = c.req.query("sort") || "day";
+  const dirRaw = c.req.query("dir") || "desc";
+  const page = Math.max(parseInt(c.req.query("page") || "1", 10) || 1, 1);
+  const pageSize = 50;
+  const offset = (page - 1) * pageSize;
+
+  const sort: "day" | "student" | "class" =
+    sortRaw === "student" || sortRaw === "class" ? sortRaw : "day";
+  const dir: "asc" | "desc" = dirRaw === "asc" ? "asc" : "desc";
+
+  const [allClasses, { records, total }] = await Promise.all([
+    listAllClasses(c.env.DB_lunar_attendance),
+    listAttendanceHistory(c.env.DB_lunar_attendance, {
+      from,
+      to,
+      classId: classId || undefined,
+      q: q || undefined,
+      sort,
+      dir,
+      limit: pageSize,
+      offset,
+    }),
+  ]);
+
+  const totalPages = Math.max(Math.ceil(total / pageSize), 1);
+  const startRow = total === 0 ? 0 : offset + 1;
+  const endRow = Math.min(offset + records.length, total);
+
+  function withParams(overrides: Record<string, string | undefined>) {
+    const params = new URLSearchParams();
+    const merged: Record<string, string> = {
+      from,
+      to,
+      class: classId,
+      q,
+      sort,
+      dir,
+      page: String(page),
+    };
+    for (const [k, v] of Object.entries(overrides)) {
+      if (v === undefined) continue;
+      merged[k] = v;
+    }
+    if (merged.from && merged.from !== defaultFrom) params.set("from", merged.from);
+    if (merged.to && merged.to !== today) params.set("to", merged.to);
+    if (merged.class) params.set("class", merged.class);
+    if (merged.q) params.set("q", merged.q);
+    if (merged.sort && merged.sort !== "day") params.set("sort", merged.sort);
+    if (merged.dir && merged.dir !== "desc") params.set("dir", merged.dir);
+    if (merged.page && merged.page !== "1") params.set("page", merged.page);
+    const s = params.toString();
+    return s ? `/admin/attendance/history?${s}` : "/admin/attendance/history";
+  }
+
+  function sortLink(col: "day" | "student" | "class", label: string) {
+    const active = sort === col;
+    const nextDir: "asc" | "desc" = active && dir === "desc" ? "asc" : "desc";
+    const arrow = active ? (dir === "desc" ? " ↓" : " ↑") : "";
+    return (
+      <a
+        href={withParams({ sort: col, dir: nextDir, page: "1" })}
+        style={`color: inherit; text-decoration: none; ${active ? "color: var(--primary);" : ""}`}
+      >
+        {label}
+        {arrow}
+      </a>
+    );
+  }
+
+  return layout(
+    c,
+    "Attendance History",
+    "history",
+    <>
+      <div style="margin-bottom: 1.5rem;">
+        <div style="font-size: 0.72rem; font-weight: 800; color: var(--primary); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.4rem;">
+          Records
+        </div>
+        <h1 style="margin: 0 0 0.4rem;">Attendance History</h1>
+        <p class="text-muted" style="margin: 0; font-size: 0.9rem;">
+          Search across every class and date range. Defaults to the last 30 days.
+        </p>
+      </div>
+
+      {/* ── Filters ── */}
+      <form
+        method="get"
+        action="/admin/attendance/history"
+        style="
+          display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)) auto;
+          gap: 0.75rem; align-items: end;
+          padding: 1rem 1.25rem; margin-bottom: 1.5rem;
+          background: var(--surface); border: 1px solid var(--line);
+          border-radius: var(--rounded-lg); box-shadow: var(--shadow-sm);
+        "
+      >
+        <div>
+          <label
+            for="history-from"
+            style="display: block; font-size: 0.72rem; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.35rem;"
+          >
+            From
+          </label>
+          <input
+            id="history-from"
+            type="date"
+            name="from"
+            value={from}
+            max={to}
+            style="
+              width: 100%; padding: 0.55rem 0.75rem;
+              border: 1px solid var(--line); border-radius: var(--rounded-md);
+              font-family: inherit; font-size: 0.9rem; background: white; color: var(--ink);
+            "
+          />
+        </div>
+        <div>
+          <label
+            for="history-to"
+            style="display: block; font-size: 0.72rem; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.35rem;"
+          >
+            To
+          </label>
+          <input
+            id="history-to"
+            type="date"
+            name="to"
+            value={to}
+            min={from}
+            max={today}
+            style="
+              width: 100%; padding: 0.55rem 0.75rem;
+              border: 1px solid var(--line); border-radius: var(--rounded-md);
+              font-family: inherit; font-size: 0.9rem; background: white; color: var(--ink);
+            "
+          />
+        </div>
+        <div>
+          <label
+            for="history-class"
+            style="display: block; font-size: 0.72rem; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.35rem;"
+          >
+            Class
+          </label>
+          <select
+            id="history-class"
+            name="class"
+            style="
+              width: 100%; padding: 0.55rem 0.75rem;
+              border: 1px solid var(--line); border-radius: var(--rounded-md);
+              font-family: inherit; font-size: 0.9rem; background: white; color: var(--ink);
+            "
+          >
+            <option value="" selected={!classId}>All classes</option>
+            {allClasses.map((cls) => (
+              <option value={cls.id} selected={cls.id === classId}>
+                {cls.code} — {cls.name}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label
+            for="history-q"
+            style="display: block; font-size: 0.72rem; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.35rem;"
+          >
+            Student
+          </label>
+          <input
+            id="history-q"
+            type="search"
+            name="q"
+            value={q}
+            placeholder="Name or ID"
+            autocomplete="off"
+            style="
+              width: 100%; padding: 0.55rem 0.75rem;
+              border: 1px solid var(--line); border-radius: var(--rounded-md);
+              font-family: inherit; font-size: 0.9rem; background: white; color: var(--ink);
+            "
+          />
+        </div>
+        <div style="display: flex; gap: 0.5rem;">
+          <button type="submit" class="btn btn-primary">
+            Apply
+          </button>
+          <a href="/admin/attendance/history" class="btn btn-secondary">
+            Reset
+          </a>
+        </div>
+      </form>
+
+      {/* ── Result summary ── */}
+      <div
+        style="
+          display: flex; align-items: center; justify-content: space-between;
+          margin-bottom: 0.75rem; font-size: 0.85rem; color: var(--muted);
+        "
+      >
+        <div>
+          {total === 0
+            ? "No records match these filters."
+            : `Showing ${startRow}–${endRow} of ${total} records`}
+        </div>
+      </div>
+
+      {/* ── Table ── */}
+      {records.length === 0 ? (
+        <div class="empty-state">
+          No attendance records found for the selected filters.
+        </div>
+      ) : (
+        <div class="table-container">
+          <table>
+            <thead style="position: sticky; top: 0; background: var(--surface); z-index: 1;">
+              <tr>
+                <th>{sortLink("day", "Date")}</th>
+                <th>Time</th>
+                <th>{sortLink("student", "Student")}</th>
+                <th>{sortLink("class", "Class")}</th>
+                <th>Check-out</th>
+                <th>Duration</th>
+                <th>Device</th>
+                <th>Country</th>
+              </tr>
+            </thead>
+            <tbody>
+              {records.map((r) => (
+                <tr>
+                  <td style="font-variant-numeric: tabular-nums;">{r.day}</td>
+                  <td>
+                    <span class="badge badge-primary" style="font-variant-numeric: tabular-nums;">
+                      {r.time}
+                    </span>
+                  </td>
+                  <td>
+                    <div class="font-semibold">{r.studentName}</div>
+                    <div class="text-muted text-sm">{r.studentId}</div>
+                  </td>
+                  <td>
+                    <a
+                      href={`/admin/classes/${r.classId}/attendance?date=${r.day}`}
+                      class="badge badge-primary"
+                      style="text-decoration: none; margin-bottom: 0.2rem; display: inline-block;"
+                    >
+                      {r.classCode}
+                    </a>
+                    <div class="text-muted text-sm">{r.className}</div>
+                  </td>
+                  <td>{r.checkoutTime ?? "—"}</td>
+                  <td>{r.duration ?? "—"}</td>
+                  <td>
+                    <span class="text-sm" style="text-transform: capitalize;">
+                      {r.deviceType ?? "unknown"}
+                    </span>
+                  </td>
+                  <td>{r.country ?? "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* ── Pagination ── */}
+      {totalPages > 1 && (
+        <div
+          style="
+            display: flex; align-items: center; justify-content: center; gap: 0.5rem;
+            margin-top: 1.5rem;
+          "
+        >
+          <a
+            href={withParams({ page: String(Math.max(page - 1, 1)) })}
+            class="btn btn-secondary"
+            aria-disabled={page === 1 ? "true" : undefined}
+            style={page === 1 ? "pointer-events: none; opacity: 0.5;" : ""}
+          >
+            ← Previous
+          </a>
+          <span style="font-size: 0.85rem; color: var(--muted); padding: 0 0.75rem;">
+            Page {page} of {totalPages}
+          </span>
+          <a
+            href={withParams({ page: String(Math.min(page + 1, totalPages)) })}
+            class="btn btn-secondary"
+            aria-disabled={page === totalPages ? "true" : undefined}
+            style={page === totalPages ? "pointer-events: none; opacity: 0.5;" : ""}
+          >
+            Next →
+          </a>
+        </div>
+      )}
+    </>,
+  );
+});
+
+
+// ── Admin Global QR Session ───────────────────────────────────────────
+// Admins can start a global QR session without a Teacher PIN. The
+// POST /api/sessions endpoint accepts admin auth as an alternative path.
+adminRoutes.get("/attendance/qr", (c) => {
+  return c.html(
+    <Layout
+      role="admin"
+      title="Global QR – Admin"
+      adminActiveTab="global-qr"
+      qrScript={true}
+    >
+      <div style="margin-bottom: 1.5rem;">
+        <div style="font-size: 0.72rem; font-weight: 800; color: var(--primary); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.4rem;">
+          Live session
+        </div>
+        <h1 style="margin: 0 0 0.4rem;">Global QR Session</h1>
+        <p class="text-muted" style="margin: 0; font-size: 0.9rem;">
+          Display this QR for any class. Students scan it from their registered
+          device to mark attendance automatically.
+        </p>
+      </div>
+
+      <div
+        style="
+          display: grid; grid-template-columns: minmax(300px, 1fr) minmax(260px, 1fr);
+          gap: 1.5rem; align-items: start;
+        "
+      >
+        <section
+          style="
+            background: var(--surface); border: 1px solid var(--line);
+            border-radius: var(--rounded-lg); box-shadow: var(--shadow-sm);
+            padding: 1.5rem; text-align: center;
+          "
+        >
+          <h2 style="margin: 0 0 0.5rem; font-size: 1.1rem;">Student scan code</h2>
+          <p class="text-muted text-sm" style="margin: 0 0 1rem;">
+            Students scan this code from their registered device.
+          </p>
+          <div
+            id="qr-wrap"
+            style="display: inline-block; background: white; padding: 1rem; border-radius: var(--rounded-md);"
+          >
+            <div id="qr"></div>
+          </div>
+          <p
+            id="scan-url"
+            class="text-muted text-sm"
+            style="margin-top: 0.75rem; word-break: break-all;"
+          ></p>
+        </section>
+
+        <section style="display: flex; flex-direction: column; gap: 1rem;">
+          <div
+            style="
+              background: var(--surface); border: 1px solid var(--line);
+              border-radius: var(--rounded-lg); box-shadow: var(--shadow-sm);
+              padding: 1.25rem;
+            "
+          >
+            <div class="text-muted text-sm" style="margin-bottom: 0.25rem;">
+              Session
+            </div>
+            <div
+              id="sessionId"
+              style="font-size: 1.5rem; font-weight: 700; font-variant-numeric: tabular-nums;"
+            >
+              Starting
+            </div>
+            <p
+              id="status"
+              class="text-muted text-sm"
+              style="margin: 0.5rem 0 0;"
+            >
+              Waiting for QR connection
+            </p>
+            <button
+              id="restartBtn"
+              type="button"
+              class="btn btn-secondary"
+              style="margin-top: 1rem; width: 100%;"
+            >
+              Restart Session
+            </button>
+          </div>
+
+          <div
+            style="
+              background: var(--surface); border: 1px solid var(--line);
+              border-radius: var(--rounded-lg); box-shadow: var(--shadow-sm);
+              padding: 1.25rem;
+            "
+          >
+            <h2 style="margin: 0 0 0.5rem; font-size: 1.05rem;">Recent scans</h2>
+            <p class="text-muted text-sm" style="margin: 0 0 0.75rem;">
+              Successful scans appear here as students mark attendance.
+            </p>
+            <div id="log" style="display: flex; flex-direction: column; gap: 0.4rem;">
+              <p data-empty-log="true" class="text-muted text-sm" style="margin: 0;">
+                No scans yet.
+              </p>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <script
+        dangerouslySetInnerHTML={{
+          __html: `
+        const classId = '__all__'
+        let ws = null
+        let statusTimer = null
+
+        async function startSession() {
+          document.getElementById('sessionId').textContent = 'Starting'
+          const res = await fetch('/api/sessions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ classId })
+          })
+          const data = await res.json()
+          if (!res.ok) throw new Error(data.error || 'Could not start attendance')
+          document.getElementById('sessionId').textContent = data.sessionId.slice(0, 8)
+          connectWs(data.sessionId)
+        }
+
+        function connectWs(sessionId) {
+          if (ws) ws.close()
+          const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
+          ws = new WebSocket(protocol + '//' + location.host + '/api/sessions/' + sessionId + '/ws')
+          ws.onmessage = (event) => {
+            const msg = JSON.parse(event.data)
+            if (msg.type === 'connected') {
+              renderQr(msg.url)
+              document.getElementById('status').textContent = 'Listening for scans...'
+              document.getElementById('status').style.color = 'var(--success)'
+            }
+            if (msg.type === 'attended') {
+              showAttended(msg.studentName, msg.alreadyMarked, msg.checkedOut, msg.className, msg.classCode)
+              appendLog(msg.studentName, msg.alreadyMarked, msg.checkedOut, msg.className, msg.classCode)
+            }
+          }
+          let reconnectDelay = 1000
+          ws.onclose = () => {
+            setTimeout(() => { connectWs(sessionId); reconnectDelay = Math.min(reconnectDelay * 2, 30000) },
+                       reconnectDelay + Math.random() * 1000)
+          }
+        }
+
+        function renderQr(url) {
+          const el = document.getElementById('qr')
+          el.innerHTML = ''
+          new QRCode(el, { text: url, width: 280, height: 280, correctLevel: QRCode.CorrectLevel.H })
+          document.getElementById('scan-url').textContent = url
+        }
+
+        function showAttended(name, alreadyMarked, checkedOut, className, classCode) {
+          const status = document.getElementById('status')
+          const classInfo = classCode ? ' (' + classCode + ')' : ''
+          if (checkedOut) {
+            status.textContent = name + classInfo + ' checked out'
+          } else {
+            status.textContent = alreadyMarked ? name + classInfo + ' was already present' : name + classInfo + ' marked present'
+          }
+          clearTimeout(statusTimer)
+          statusTimer = setTimeout(() => {
+            status.textContent = 'Listening for scans...'
+          }, 3500)
+        }
+
+        function appendLog(name, alreadyMarked, checkedOut, className, classCode) {
+          const row = document.createElement('p')
+          row.style.margin = '0'
+          row.style.fontSize = '0.85rem'
+          let actionText = ' - '
+          if (checkedOut) actionText = ' checked out - '
+          else if (alreadyMarked) actionText = ' already present - '
+          const classInfo = classCode ? ' (' + classCode + ') ' : ''
+          row.textContent = name + classInfo + actionText + new Date().toLocaleTimeString()
+          const log = document.getElementById('log')
+          const empty = log.querySelector('[data-empty-log]')
+          if (empty) empty.remove()
+          log.prepend(row)
+        }
+
+        document.getElementById('restartBtn').addEventListener('click', () => startSession().catch(showError))
+
+        function showError(error) {
+          document.getElementById('status').textContent = error.message
+          document.getElementById('status').style.color = 'var(--danger)'
+        }
+
+        startSession().catch(showError)
+      `,
+        }}
+      />
+    </Layout>,
   );
 });

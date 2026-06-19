@@ -12,8 +12,15 @@ interface LayoutProps {
     | "wifi"
     | "attendance"
     | "today"
+    | "history"
+    | "global-qr"
     | string;
-  teacherActiveTab?: "classes" | "today" | "global-qr" | string;
+  teacherActiveTab?:
+    | "classes"
+    | "today"
+    | "global-qr"
+    | "history"
+    | string;
   qrScript?: boolean;
   backHref?: string;
   backLabel?: string;
@@ -135,16 +142,28 @@ export function Layout({
                   Wi-Fi IPs
                 </a>
                 <a
+                  href="/admin/attendance/today"
+                  class={`tab ${adminActiveTab === "today" ? "active" : ""}`}
+                >
+                  Today's Attendance
+                </a>
+                <a
+                  href="/admin/attendance/history"
+                  class={`tab ${adminActiveTab === "history" ? "active" : ""}`}
+                >
+                  History
+                </a>
+                <a
+                  href="/admin/attendance/qr"
+                  class={`tab ${adminActiveTab === "global-qr" ? "active" : ""}`}
+                >
+                  Global QR
+                </a>
+                <a
                   href="/admin/attendance"
                   class={`tab ${adminActiveTab === "attendance" ? "active" : ""}`}
                 >
                   Attendance Log
-                </a>
-                <a
-                  href="/attendance/today"
-                  class={`tab ${adminActiveTab === "today" ? "active" : ""}`}
-                >
-                  Today's Attendance
                 </a>
               </div>
             </nav>
@@ -164,6 +183,12 @@ export function Layout({
                   class={`tab ${teacherActiveTab === "today" ? "active" : ""}`}
                 >
                   Today's Feed
+                </a>
+                <a
+                  href="/teacher/attendance/history"
+                  class={`tab ${teacherActiveTab === "history" ? "active" : ""}`}
+                >
+                  History
                 </a>
                 <a
                   href="/teacher/attendance/main"
