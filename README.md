@@ -6,7 +6,7 @@ The project currently includes a dummy external system in a second D1 database s
 
 ## What It Does
 
-- Teacher login using records from `DB_external_dummy`.
+- Teacher login using records from `DB_lunar_attendance`.
 - Teacher class dashboard from the external dummy class roster.
 - Student list for each class, including students enrolled in multiple classes.
 - One-time student access QR generation.
@@ -22,23 +22,21 @@ The project currently includes a dummy external system in a second D1 database s
 - Per-class and per-student attendance history.
 - Admin dashboard with real-time system metrics (Total Teachers, Students, Classes, Records).
 - Administrative search for teachers and students.
+- Admin-managed Wi-Fi public IP allowlist for attendance scan restrictions.
 - System-wide attendance audit log with metadata (Device, IP, Location).
 - CSV export for full attendance history.
 - Administrative control to delete erroneous attendance records.
 
 ## How It Works
 
-The app is split into two data areas:
-
-- `DB_external_dummy`: fake external source of truth for teachers, classes, class membership, students, teacher sessions, student access grants, student access tokens, and attendance records.
-- `DB_lunar_attendance`: local app database for live attendance session metadata only.
+The app uses `DB_lunar_attendance` as the source of truth for teachers, classes, class membership, students, teacher sessions, student sessions, student access grants, student access tokens, attendance records, and live attendance session metadata.
 
 The live attendance state lives in the `lunarAttendance` Durable Object. The Durable Object owns the current QR token, rotates it, checks expiry, accepts student submissions, writes attendance records to the external source of truth, and broadcasts updates to the teacher screen over WebSocket.
 
 The current flow is:
 
 1. A teacher signs in at `/teacher/class`.
-2. The app creates an HTTP-only `teacher_session` cookie from `DB_external_dummy`.
+2. The app creates an HTTP-only `teacher_session` cookie from `DB_lunar_attendance`.
 3. The teacher opens a class and can view students, attendance history, or start attendance.
 4. For student access, the teacher opens a student access QR page. That QR can be claimed once.
 5. When the student scans the access QR, `/student/access` asks them to confirm, then stores a course-bound access token in the student's browser.
@@ -46,7 +44,7 @@ The current flow is:
 7. The Durable Object generates a short-lived QR URL like `/attend?s=<sessionId>&q=<qrToken>`.
 8. The teacher screen receives QR updates over `/api/sessions/:id/ws`.
 9. A student scans the attendance QR. The browser sends the session ID, QR token, and saved access token to `/api/attend`.
-10. The Durable Object verifies the QR token, verifies the student is enrolled in that class through `DB_external_dummy`, records attendance in `DB_external_dummy`, and returns a rotated student access token to the browser.
+10. The Durable Object verifies the QR token, verifies the student is enrolled in that class through `DB_lunar_attendance`, records attendance in `DB_lunar_attendance`, and returns a rotated student access token to the browser.
 
 Dates are grouped using the local app timezone in `src/lib/date.ts` (`Asia/Kathmandu`).
 
@@ -82,6 +80,7 @@ Admin routes (Protected by `ADMIN_SECRET`):
 - `/admin` - System dashboard with real-time stats.
 - `/admin/teachers` - Manage teachers with search filtering.
 - `/admin/students` - Manage students with search filtering.
+- `/admin/wifi` - Manage public IP addresses allowed to submit attendance scans.
 - `/admin/attendance` - System-wide audit log of all scans.
 - `/admin/attendance/export` - Download full attendance history as CSV.
 
@@ -99,10 +98,19 @@ Create local D1 tables:
 
 ```txt
 pnpm exec wrangler d1 execute DB_lunar_attendance --local --file=schema.sql
-pnpm exec wrangler d1 execute DB_external_dummy --local --file=external-schema.sql
+pnpm exec wrangler d1 execute DB_lunar_attendance --local --file=local_data-external-db.sql
+pnpm exec wrangler d1 execute DB_lunar_attendance --local --file=local_data.sql
 ```
 
-Re-running `schema.sql` removes obsolete local test attendance tables. Re-running `external-schema.sql` resets the dummy external database and reseeds the teacher, class, student, and enrollment test data.
+`schema.sql` is non-destructive and creates missing tables/indexes. The two data files seed teachers, classes, students, enrollments, access tokens, attendance records, and live sessions.
+
+Apply the same setup to the remote D1 database:
+
+```txt
+pnpm exec wrangler d1 migrations apply lunar-attendance --remote
+pnpm exec wrangler d1 execute lunar-attendance --remote --file=local_data-external-db.sql
+pnpm exec wrangler d1 execute lunar-attendance --remote --file=local_data.sql
+```
 
 Start the Worker:
 
@@ -137,7 +145,7 @@ Seeded classes and students:
 - `student_2` belongs to `CS101`.
 - `student_3` belongs to `MATH201`.
 
-The external dummy data is also created lazily by the app through `ensureExternalDummyData`, but running `external-schema.sql` makes the local database state explicit.
+The seed data is explicit SQL, so a fresh remote database must have migrations and the data files applied before deployment.
 
 ## Useful Commands
 
@@ -177,13 +185,14 @@ pnpm exec wrangler deploy --dry-run
 - Student tokens are still stored in `localStorage` for the prototype, but the server now limits them to the enrolled course end date, expires them after 7 days without a scan, and revokes/replaces the token after each scan.
 - Teacher sessions use an HTTP-only cookie. Sensitive attendance actions require a fresh teacher PIN check, currently valid for 10 minutes.
 - KV rate limiting is best effort because KV updates are not atomic. For production, pair it with Cloudflare WAF/rate limiting or a Durable Object-backed limiter for high-risk endpoints.
+- Attendance scan Wi-Fi enforcement uses admin-managed public IP addresses from `allowed_wifi_ips`. If no enabled IPs exist, the app falls back to matching the student's IP against the teacher session IP.
 - Device metadata helps investigations, but browser-supplied fields can be spoofed. Treat IP and Cloudflare-derived country as stronger signals than client timezone, platform, or screen size.
 - The Admin Portal is protected by a simple shared secret (`ADMIN_SECRET`). For production, this should be replaced by a robust RBAC system.
 - The current CSP still allows inline scripts and the QR code CDN because the prototype renders inline page scripts. A production pass should move scripts to static files or nonces and self-host third-party assets.
 
 ## Current Limitations
 
-- `DB_external_dummy` is only a local testing stand-in for a real external API.
+- `DB_lunar_attendance` currently stores both roster data and attendance data until a real external API is integrated.
 - Teacher PINs in the dummy DB are plaintext for testing.
 - Student access tokens are stored in browser `localStorage`, which is convenient for a prototype but should be revisited before production.
 - The QR code library is loaded from a CDN on the teacher pages.

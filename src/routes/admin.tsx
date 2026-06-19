@@ -1,6 +1,9 @@
+/** @jsxImportSource hono/jsx */
 import { Hono } from "hono";
 import type { Context } from "hono";
+import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import { Env } from "../types";
+import { localDateKey } from "../lib/date";
 import {
   assignTeacherToClass,
   createClass,
@@ -26,51 +29,55 @@ import {
   listClassAttendanceDays,
   listStudentAttendanceSummaries,
   getAdminStats,
+  listAttendanceForDay,
+  listAttendanceHistory,
 } from "../lib/externalDummy";
+import { signAdminToken, verifyAdminToken, ADMIN_COOKIE } from "../lib/auth";
+import { Layout } from "../components/Layout";
+import { requestIp } from "../lib/rateLimit";
+import {
+  deleteAllowedWifiIp,
+  getWifiAccessDecision,
+  listAllowedWifiIps,
+  normalizeIpAddress,
+  saveAllowedWifiIp,
+  setAllowedWifiIpEnabled,
+} from "../lib/wifi";
+
 export const adminRoutes = new Hono<{ Bindings: Env }>();
 type AppContext = Context<{ Bindings: Env }>;
-// ── Auth helpers ─────────────────────────────────────────────────────
-const COOKIE_NAME = "admin_session";
-async function signToken(secret: string): Promise<string> {
-  const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    "raw",
-    encoder.encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const payload = "admin:authenticated";
-  const sig = await crypto.subtle.sign("HMAC", key, encoder.encode(payload));
-  const hex = [...new Uint8Array(sig)]
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-  return `${payload}.${hex}`;
+
+function boundedText(value: unknown, maxLength: number) {
+  return String(value ?? "")
+    .replace(/[\u0000-\u001f\u007f]/g, "")
+    .trim()
+    .slice(0, maxLength);
 }
-async function verifyToken(token: string, secret: string): Promise<boolean> {
-  try {
-    const [payload, hex] = token.split(".");
-    if (!payload || !hex) return false;
-    const encoder = new TextEncoder();
-    const key = await crypto.subtle.importKey(
-      "raw",
-      encoder.encode(secret),
-      { name: "HMAC", hash: "SHA-256" },
-      false,
-      ["verify"],
-    );
-    const sigBytes = new Uint8Array(
-      hex.match(/.{2}/g)!.map((b) => parseInt(b, 16)),
-    );
-    return crypto.subtle.verify("HMAC", key, sigBytes, encoder.encode(payload));
-  } catch {
-    return false;
-  }
+
+// ── Date helpers (shared by attendance views) ────────────────────────
+function getDateOffset(date: string, offset: number): string {
+  const [y, m, d] = date.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + offset);
+  return dt.toISOString().split("T")[0];
 }
-function getCookie(c: AppContext, name: string): string | undefined {
-  const header = c.req.header("Cookie") ?? "";
-  const match = header.match(new RegExp(`(?:^|;\\s*)${name}=([^;]*)`));
-  return match ? decodeURIComponent(match[1]) : undefined;
+
+function formatDisplayDate(date: string): string {
+  const [y, m, d] = date.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.toLocaleDateString("en-US", {
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+}
+
+function relativeLabel(date: string, today: string): string | null {
+  if (date === today) return "Today";
+  if (date === getDateOffset(today, -1)) return "Yesterday";
+  if (date === getDateOffset(today, 1)) return "Tomorrow";
+  return null;
 }
 // ── Login page ───────────────────────────────────────────────────────
 function loginPage(c: AppContext, error?: string) {
@@ -138,10 +145,20 @@ function loginPage(c: AppContext, error?: string) {
     </html>,
   );
 }
+
+adminRoutes.use("*", async (c, next) => {
+  const path = new URL(c.req.url).pathname;
+  if (path === "/admin/login") return next();
+  const token = getCookie(c, ADMIN_COOKIE);
+  if (!token || !(await verifyAdminToken(token, c.env.ADMIN_SECRET))) {
+    return c.redirect("/admin/login");
+  }
+  await next();
+}); 
 adminRoutes.get("/login", async (c) => {
   // If already authenticated, redirect to dashboard
-  const token = getCookie(c, COOKIE_NAME);
-  if (token && (await verifyToken(token, c.env.ADMIN_SECRET))) {
+  const token = getCookie(c, ADMIN_COOKIE);
+  if (token && (await verifyAdminToken(token, c.env.ADMIN_SECRET))) {
     return c.redirect("/admin");
   }
   return loginPage(c);
@@ -151,210 +168,17 @@ adminRoutes.post("/login", async (c) => {
   if (secret !== c.env.ADMIN_SECRET) {
     return loginPage(c, "Invalid secret. Please try again.");
   }
-  const token = await signToken(c.env.ADMIN_SECRET);
-  return new Response(null, {
-    status: 302,
-    headers: {
-      Location: "/admin",
-      "Set-Cookie": `${COOKIE_NAME}=${encodeURIComponent(token)}; Path=/admin; HttpOnly; SameSite=Lax; Max-Age=86400`,
-    },
-  });
+  const token = await signAdminToken(c.env.ADMIN_SECRET);
+  setCookie(c, ADMIN_COOKIE, token);
+  return c.redirect("/admin");
 });
 adminRoutes.get("/logout", async (c) => {
-  return new Response(null, {
-    status: 302,
-    headers: {
-      Location: "/admin/login",
-      "Set-Cookie": `${COOKIE_NAME}=; Path=/admin; HttpOnly; SameSite=Lax; Max-Age=0`,
-    },
-  });
+  deleteCookie(c, ADMIN_COOKIE, { path: "/admin" });
+  return c.redirect("/admin/login");
 });
 // ── Auth middleware (protects all routes below) ──────────────────────
-adminRoutes.use("*", async (c, next) => {
-  const path = new URL(c.req.url).pathname;
-  if (path === "/admin/login") return next();
-  const token = getCookie(c, COOKIE_NAME);
-  if (!token || !(await verifyToken(token, c.env.ADMIN_SECRET))) {
-    return c.redirect("/admin/login");
-  }
-  await next();
-});
-const adminStyles = `
-  @import url("https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800;900&display=swap");
-  :root {
-    color-scheme: light;
-    --font-sans: "Plus Jakarta Sans", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    --primary: #d97706; /* Richer Amber */
-    --primary-soft: #fef3c7;
-    --primary-hover: #b45309;
-    --ink: #0f172a;
-    --ink-light: #334155;
-    --muted: #64748b;
-    --bg: #f8fafc;
-    --surface: #ffffff;
-    --line: #e2e8f0;
-    --success: #10b981;
-    --danger: #ef4444;
-    --danger-soft: #fee2e2;
-    --danger-hover: #dc2626;
-    --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
-    --shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
-    --shadow-md: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
-    --rounded-lg: 0.75rem;
-    --rounded-xl: 1rem;
-    --rounded-2xl: 1.5rem;
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0;
-    min-height: 100vh;
-    font-family: var(--font-sans);
-    background: var(--bg);
-    color: var(--ink);
-    -webkit-font-smoothing: antialiased;
-  }
-  /* Header & Navigation */
-  .topbar {
-    position: sticky; top: 0; z-index: 50;
-    background: rgba(255, 255, 255, 0.7);
-    backdrop-filter: blur(16px);
-    border-bottom: 1px solid rgba(226, 232, 240, 0.8);
-    padding: 1rem 2rem;
-  }
-  .topbar-inner { max-width: 1200px; margin: 0 auto; display: flex; align-items: center; justify-content: space-between; }
-  .brand { 
-    font-weight: 800; font-size: 1.25rem; color: var(--ink); text-decoration: none; 
-    display: flex; align-items: center; gap: 0.5rem; letter-spacing: -0.02em;
-  }
-  .brand-accent { color: var(--primary); }
-  .tabs {
-    background: rgba(255, 255, 255, 0.9); backdrop-filter: blur(12px);
-    border-bottom: 1px solid var(--line);
-    position: sticky; top: 61px; z-index: 40;
-  }
-  .tabs-inner { max-width: 1200px; margin: 0 auto; display: flex; gap: 2.5rem; padding: 0 2rem; }
-  .tab {
-    padding: 1.25rem 0; color: var(--muted); font-weight: 600; text-decoration: none; font-size: 0.95rem;
-    border-bottom: 2px solid transparent; transition: all 0.2s ease; position: relative;
-  }
-  .tab:hover { color: var(--ink); }
-  .tab.active { color: var(--primary); }
-  .tab.active::after {
-    content: ''; position: absolute; bottom: -1px; left: 0; right: 0; height: 2px;
-    background: var(--primary); border-radius: 2px 2px 0 0;
-  }
-  .main { max-width: 1200px; margin: 3rem auto; padding: 0 2rem 5rem; }
-  
-  /* Cards */
-  .card {
-    background: var(--surface); border-radius: var(--rounded-xl); padding: 2rem;
-    box-shadow: var(--shadow-sm); border: 1px solid var(--line); margin-bottom: 2rem;
-    transition: box-shadow 0.3s ease, transform 0.3s ease;
-  }
-  .card-interactive:hover {
-    box-shadow: var(--shadow-md); transform: translateY(-2px); border-color: #cbd5e1;
-  }
-  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 1.5rem; }
-  /* Typography */
-  h1 { font-size: 2rem; font-weight: 800; letter-spacing: -0.02em; margin: 0 0 2rem 0; color: var(--ink); }
-  h2 { font-size: 1.25rem; font-weight: 700; letter-spacing: -0.01em; margin: 0 0 1rem 0; color: var(--ink); }
-  
-  .text-muted { color: var(--muted); }
-  .text-sm { font-size: 0.875rem; }
-  .font-semibold { font-weight: 600; }
-  /* Forms */
-  .inline-form { 
-    display: flex; gap: 1rem; align-items: flex-end; margin-bottom: 2rem; flex-wrap: wrap; 
-    background: #fdfdfd; padding: 1.5rem; border-radius: var(--rounded-xl); border: 1px solid var(--line);
-    box-shadow: var(--shadow-sm);
-  }
-  .field { display: flex; flex-direction: column; gap: 0.5rem; flex: 1; min-width: 200px; }
-  .field label { font-size: 0.8rem; font-weight: 700; color: var(--ink-light); text-transform: uppercase; letter-spacing: 0.05em; }
-  input {
-    padding: 0.75rem 1rem; border: 1px solid var(--line); border-radius: var(--rounded-lg);
-    font-family: inherit; font-size: 0.95rem; outline: none; transition: all 0.2s ease;
-    background: var(--bg); color: var(--ink);
-  }
-  input:hover { border-color: #cbd5e1; }
-  input:focus { border-color: var(--primary); background: white; box-shadow: 0 0 0 3px var(--primary-soft); }
-  /* Buttons */
-  button, .btn {
-    padding: 0.75rem 1.5rem; border-radius: var(--rounded-lg); font-weight: 600; font-size: 0.9rem;
-    cursor: pointer; border: 1px solid transparent; transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); font-family: inherit;
-    display: inline-flex; align-items: center; justify-content: center; text-decoration: none; gap: 0.5rem;
-  }
-  .btn-primary { background: var(--primary); color: white; box-shadow: 0 2px 4px rgba(217, 119, 6, 0.2); }
-  .btn-primary:hover { background: var(--primary-hover); transform: translateY(-1px); box-shadow: 0 4px 6px rgba(217, 119, 6, 0.3); }
-  .btn-primary:active { transform: translateY(0); }
-  
-  .btn-secondary { background: var(--bg); border: 1px solid var(--line); color: var(--ink); }
-  .btn-secondary:hover { background: #f1f5f9; border-color: #cbd5e1; }
-  
-  .btn-danger { background: var(--surface); border: 1px solid var(--danger-soft); color: var(--danger); }
-  .btn-danger:hover { background: var(--danger-soft); border-color: #fca5a5; }
-  .btn-ghost { color: var(--muted); background: transparent; }
-  .btn-ghost:hover { background: var(--bg); color: var(--ink); }
-  
-  .btn-icon { padding: 0.6rem; border-radius: 0.5rem; line-height: 0; }
-  /* Tables */
-  .table-container {
-    background: white; border-radius: var(--rounded-xl); border: 1px solid var(--line);
-    overflow: hidden; box-shadow: var(--shadow-sm); margin-bottom: 2rem;
-  }
-  table { width: 100%; border-collapse: collapse; text-align: left; }
-  th { 
-    font-size: 0.75rem; font-weight: 700; color: var(--muted); text-transform: uppercase; 
-    padding: 1rem 1.5rem; border-bottom: 1px solid var(--line); background: #f8fafc; letter-spacing: 0.05em;
-  }
-  td { padding: 1rem 1.5rem; border-bottom: 1px solid var(--line); font-size: 0.95rem; vertical-align: middle; }
-  tr:last-child td { border-bottom: 0; }
-  tbody tr { transition: background-color 0.2s; }
-  tbody tr:hover { background-color: #f1f5f9; }
-  /* Badges */
-  .badge { 
-    padding: 0.25rem 0.75rem; border-radius: 99px; font-size: 0.75rem; font-weight: 700; 
-    background: var(--bg); color: var(--ink-light); border: 1px solid var(--line); display: inline-block;
-  }
-  .badge-primary { background: var(--primary-soft); color: var(--primary-hover); border-color: transparent; }
-  /* Lists */
-  .class-split { display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; }
-  @media (max-width: 900px) { .class-split { grid-template-columns: 1fr; } }
-  .scroll-box { max-height: 450px; overflow-y: auto; margin: -1rem; padding: 1rem; }
-  /* Custom Scrollbar for scroll-box */
-  .scroll-box::-webkit-scrollbar { width: 6px; }
-  .scroll-box::-webkit-scrollbar-track { background: transparent; }
-  .scroll-box::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 10px; }
-  .scroll-box::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
-  .list-item { 
-    display: flex; align-items: center; justify-content: space-between; 
-    padding: 1rem; border-radius: var(--rounded-lg); border: 1px solid var(--line);
-    margin-bottom: 0.5rem; background: white; transition: all 0.2s ease;
-  }
-  .list-item:hover { border-color: #cbd5e1; box-shadow: var(--shadow-sm); }
-  .list-item:last-child { margin-bottom: 0; }
-  .item-info { display: flex; flex-direction: column; gap: 0.25rem; }
-  .item-name { font-weight: 600; font-size: 0.95rem; color: var(--ink); }
-  .item-email { font-size: 0.85rem; color: var(--muted); }
-  
-  /* Stat Cards */
-  .stat-card {
-    background: white; border-radius: var(--rounded-xl); padding: 2rem;
-    border: 1px solid var(--line); display: flex; flex-direction: column;
-    position: relative; overflow: hidden; box-shadow: var(--shadow-sm);
-  }
-  .stat-card::before {
-    content: ''; position: absolute; top: 0; left: 0; right: 0; height: 4px;
-    background: linear-gradient(90deg, var(--primary), #fcd34d);
-    opacity: 0.8;
-  }
-  .stat-label { font-size: 0.85rem; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.5rem; }
-  .stat-value { font-size: 3.5rem; font-weight: 800; color: var(--ink); line-height: 1; letter-spacing: -0.02em; margin-bottom: 1.5rem; }
-  
-  /* Utilities */
-  .flex-between { display: flex; justify-content: space-between; align-items: center; }
-  .gap-2 { gap: 0.5rem; display: flex; align-items: center; }
-  .empty-state { text-align: center; padding: 4rem 2rem; color: var(--muted); background: var(--bg); border-radius: var(--rounded-lg); border: 1px dashed #cbd5e1; }
-`;
+
+// ── Shared layout helper ─────────────────────────────────────────────
 function layout(
   c: AppContext,
   title: string,
@@ -362,69 +186,12 @@ function layout(
   children: any,
 ) {
   return c.html(
-    <html lang="en">
-      <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <title>{title} - Admin</title>
-        <style>{adminStyles}</style>
-      </head>
-      <body>
-        <header class="topbar">
-          <div class="topbar-inner">
-            <a href="/admin" class="brand">
-              LUNAR <span class="brand-accent">ADMIN</span>
-            </a>
-            <div class="gap-2">
-              <div class="badge">INTERNAL TOOLS</div>
-              <a
-                href="/admin/logout"
-                class="btn btn-ghost"
-                style="font-size: 0.8rem; padding: 0.4rem 0.75rem;"
-              >
-                Logout
-              </a>
-            </div>
-          </div>
-        </header>
-        <nav class="tabs">
-          <div class="tabs-inner">
-            <a
-              href="/admin"
-              class={`tab ${activeTab === "overview" ? "active" : ""}`}
-            >
-              Overview
-            </a>
-            <a
-              href="/admin/teachers"
-              class={`tab ${activeTab === "teachers" ? "active" : ""}`}
-            >
-              Teachers
-            </a>
-            <a
-              href="/admin/students"
-              class={`tab ${activeTab === "students" ? "active" : ""}`}
-            >
-              Students
-            </a>
-            <a
-              href="/admin/classes"
-              class={`tab ${activeTab === "classes" ? "active" : ""}`}
-            >
-              Classes
-            </a>
-            <a
-              href="/admin/attendance"
-              class={`tab ${activeTab === "attendance" ? "active" : ""}`}
-            >
-              Attendance
-            </a>
-          </div>
-        </nav>
-        <main class="main">{children}</main>
-      </body>
-    </html>,
+    <Layout role="admin" title={`${title} – Admin`} adminActiveTab={activeTab}>
+      {children}
+    </Layout>,
   );
 }
+
 // Icons
 const IconPlus = () => (
   <svg
@@ -855,14 +622,23 @@ adminRoutes.get("/classes", async (c) => {
                   </button>
                 </form>
               </div>
-              <h2 style="margin: 0.5rem 0 1.5rem;">{cls.name}</h2>
-              <a
-                href={`/admin/classes/${cls.id}`}
-                class="btn btn-secondary"
-                style="width: 100%;"
-              >
-                Manage Roster →
-              </a>
+              <h2 style="margin: 0.5rem 0 1.25rem;">{cls.name}</h2>
+              <div style="display: flex; flex-direction: column; gap: 0.5rem;">
+                <a
+                  href={`/admin/classes/${cls.id}/attendance`}
+                  class="btn btn-primary"
+                  style="width: 100%;"
+                >
+                  View Attendance →
+                </a>
+                <a
+                  href={`/admin/classes/${cls.id}`}
+                  class="btn btn-secondary"
+                  style="width: 100%;"
+                >
+                  Manage Roster
+                </a>
+              </div>
             </div>
           ))}
         </div>
@@ -1268,6 +1044,201 @@ adminRoutes.post("/classes/:id/unassign", async (c) => {
   );
   return c.redirect(`/admin/classes/${c.req.param("id")}`);
 });
+
+// ── Wi-Fi IP Allowlist ───────────────────────────────────────────────
+adminRoutes.get("/wifi", async (c) => {
+  const wifiIps = await listAllowedWifiIps(c.env.DB_lunar_attendance);
+  const currentIp = requestIp(c.req.raw);
+  const normalizedCurrentIp = normalizeIpAddress(currentIp);
+  const invalidIp = c.req.query("error") === "invalid-ip";
+  const testIp = c.req.query("testIp");
+  const testResult = c.req.query("testResult");
+
+  return layout(
+    c,
+    "Wi-Fi IPs",
+    "wifi",
+    <>
+      <div class="flex-between" style="margin-bottom: 1.5rem;">
+        <div>
+          <h1 style="margin: 0;">Wi-Fi IP Allowlist</h1>
+          <p class="text-muted" style="margin: 0.5rem 0 0;">
+            Attendance scans are accepted from enabled public IP addresses.
+          </p>
+        </div>
+        <div class="badge">
+          Current IP: {normalizedCurrentIp ?? currentIp}
+        </div>
+      </div>
+
+      {invalidIp && (
+        <div
+          class="empty-state"
+          style="margin-bottom: 1rem; background: var(--danger-soft); color: var(--danger);"
+        >
+          Enter a valid IPv4 or IPv6 address.
+        </div>
+      )}
+
+      <form class="inline-form" method="post" action="/admin/wifi">
+        <div class="field">
+          <label>Network Label</label>
+          <input name="label" placeholder="Main campus Wi-Fi" required />
+        </div>
+        <div class="field">
+          <label>Public IP Address</label>
+          <input
+            name="ipAddress"
+            placeholder="203.0.113.10"
+            value={normalizedCurrentIp ?? ""}
+            required
+          />
+        </div>
+        <button type="submit" class="btn btn-primary">
+          <IconPlus /> Add IP
+        </button>
+      </form>
+
+      <form class="inline-form" method="post" action="/admin/wifi/test">
+        <div class="field">
+          <label>Test an IP against the allowlist</label>
+          <input
+            name="testIp"
+            placeholder="203.0.113.10"
+            value={String(testIp ?? "")}
+            required
+          />
+        </div>
+        <button type="submit" class="btn btn-secondary">
+          Test IP
+        </button>
+      </form>
+
+      {testResult && (
+        <div class="empty-state" style="margin-top: 1rem;">
+          {testResult === "allowed" ? (
+            <span style="color: var(--success);">This IP is allowed.</span>
+          ) : (
+            <span style="color: var(--danger);">This IP is not allowed.</span>
+          )}
+        </div>
+      )}
+
+      {wifiIps.length === 0 ? (
+        <div class="empty-state" style="margin-top: 2rem;">
+          No Wi-Fi IPs configured. Attendance will use the teacher session IP
+          until an IP is added here.
+        </div>
+      ) : (
+        <div class="table-container">
+          <table>
+            <thead>
+              <tr>
+                <th>Status</th>
+                <th>Label</th>
+                <th>IP Address</th>
+                <th>Created</th>
+                <th style="text-align: right;">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {wifiIps.map((ip) => (
+                <tr>
+                  <td>
+                    <span class={`badge ${ip.enabled ? "badge-primary" : ""}`}>
+                      {ip.enabled ? "Enabled" : "Disabled"}
+                    </span>
+                  </td>
+                  <td class="font-semibold">{ip.label}</td>
+                  <td>
+                    <span class="badge">{ip.ipAddress}</span>
+                  </td>
+                  <td class="text-muted text-sm">
+                    {new Date(ip.createdAt * 1000).toLocaleString()}
+                  </td>
+                  <td style="text-align: right;">
+                    <div
+                      style="display: flex; gap: 0.5rem; justify-content: flex-end;"
+                    >
+                      <form
+                        method="post"
+                        action={`/admin/wifi/${ip.id}/${ip.enabled ? "disable" : "enable"}`}
+                      >
+                        <button class="btn btn-secondary">
+                          {ip.enabled ? "Disable" : "Enable"}
+                        </button>
+                      </form>
+                      <form
+                        method="post"
+                        action={`/admin/wifi/${ip.id}/delete`}
+                        onsubmit="return confirm('Delete this Wi-Fi IP?')"
+                      >
+                        <button class="btn btn-danger btn-icon" title="Delete">
+                          <IconTrash />
+                        </button>
+                      </form>
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </>,
+  );
+});
+
+adminRoutes.post("/wifi", async (c) => {
+  const body = await c.req.parseBody();
+  const result = await saveAllowedWifiIp(
+    c.env.DB_lunar_attendance,
+    boundedText(body.label, 80),
+    boundedText(body.ipAddress, 80),
+  );
+
+  if (!result.ok) {
+    return c.redirect("/admin/wifi?error=invalid-ip");
+  }
+
+  return c.redirect("/admin/wifi");
+});
+
+adminRoutes.post("/wifi/test", async (c) => {
+  const body = await c.req.parseBody();
+  const testIp = boundedText(body.testIp, 80);
+  const result = await getWifiAccessDecision(
+    c.env.DB_lunar_attendance,
+    testIp,
+  );
+
+  const testResult = result.configured && result.allowed ? "allowed" : "blocked";
+  return c.redirect(`/admin/wifi?testIp=${encodeURIComponent(testIp)}&testResult=${testResult}`);
+});
+
+adminRoutes.post("/wifi/:id/enable", async (c) => {
+  await setAllowedWifiIpEnabled(
+    c.env.DB_lunar_attendance,
+    c.req.param("id"),
+    true,
+  );
+  return c.redirect("/admin/wifi");
+});
+
+adminRoutes.post("/wifi/:id/disable", async (c) => {
+  await setAllowedWifiIpEnabled(
+    c.env.DB_lunar_attendance,
+    c.req.param("id"),
+    false,
+  );
+  return c.redirect("/admin/wifi");
+});
+
+adminRoutes.post("/wifi/:id/delete", async (c) => {
+  await deleteAllowedWifiIp(c.env.DB_lunar_attendance, c.req.param("id"));
+  return c.redirect("/admin/wifi");
+});
+
 // ── Attendance Log ───────────────────────────────────────────────────
 adminRoutes.get("/attendance", async (c) => {
   const records = await listAllAttendanceRecords(c.env.DB_lunar_attendance);
@@ -1296,6 +1267,8 @@ adminRoutes.get("/attendance", async (c) => {
               <th>Time</th>
               <th>Student</th>
               <th>Class</th>
+              <th>Check-out</th>
+              <th>Duration</th>
               <th>Device</th>
               <th>Country</th>
               <th style="text-align: right;">Actions</th>
@@ -1320,6 +1293,13 @@ adminRoutes.get("/attendance", async (c) => {
                   >
                     {r.classCode}
                   </a>
+                  <div class="text-muted text-sm">{r.className}</div>
+                </td>
+                <td>
+                  <span class="text-sm">{r.checkoutTime ?? "—"}</span>
+                </td>
+                <td>
+                  <span class="text-sm">{r.duration ?? "—"}</span>
                 </td>
                 <td>
                   <span class="text-sm">{r.deviceType || "Unknown"}</span>
@@ -1345,7 +1325,7 @@ adminRoutes.get("/attendance", async (c) => {
             ))}
             {records.length === 0 && (
               <tr>
-                <td colspan={6}>
+                <td colspan={8}>
                   <div class="empty-state">
                     No attendance records found yet.
                   </div>
@@ -1369,6 +1349,8 @@ adminRoutes.get("/attendance/export", async (c) => {
   const headers = [
     "Date",
     "Time",
+    "Checkout Time",
+    "Duration",
     "Student Name",
     "Student ID",
     "Class Code",
@@ -1380,6 +1362,8 @@ adminRoutes.get("/attendance/export", async (c) => {
   const rows = records.map((r) => [
     r.day,
     r.time,
+    r.checkoutTime || "",
+    r.duration || "",
     `"${r.studentName.replace(/"/g, '""')}"`,
     r.studentId,
     r.classCode,
@@ -1397,4 +1381,1108 @@ adminRoutes.get("/attendance/export", async (c) => {
     'attachment; filename="attendance_export.csv"',
   );
   return c.body(csv);
+});
+
+// ── Today's Attendance (admin-scoped, all classes) ─────────────────────
+// NOTE: This route lives inside adminRoutes so the browser sends the
+// admin_session cookie (Path=/admin). Do NOT move it to a shared router.
+adminRoutes.get("/attendance/today", async (c) => {
+  const today = localDateKey();
+  const selectedDate = c.req.query("date") || today;
+  const selectedClassId = c.req.query("class") || "";
+  const isToday = selectedDate === today;
+  const prevDate = getDateOffset(selectedDate, -1);
+  const nextDate = getDateOffset(selectedDate, 1);
+  const displayDate = formatDisplayDate(selectedDate);
+  const relLabel = relativeLabel(selectedDate, today);
+
+  const [allClasses, dayRecords] = await Promise.all([
+    listAllClasses(c.env.DB_lunar_attendance),
+    listAttendanceForDay(c.env.DB_lunar_attendance, selectedDate),
+  ]);
+  const records = selectedClassId
+    ? dayRecords.filter((r) => r.classId === selectedClassId)
+    : dayRecords;
+
+  const uniqueStudents = new Set(records.map((r) => r.studentId)).size;
+  const uniqueClasses = new Set(records.map((r) => r.classId)).size;
+  const totalCount = records.length;
+
+  function withParams(overrides: Record<string, string | undefined>) {
+    const params = new URLSearchParams();
+    const date = overrides.date ?? selectedDate;
+    if (date && date !== today) params.set("date", date);
+    const cls = overrides.class ?? selectedClassId;
+    if (cls) params.set("class", cls);
+    const q = params.toString();
+    return q ? `/admin/attendance/today?${q}` : "/admin/attendance/today";
+  }
+
+  const searchScript = `
+(function () {
+  var input = document.getElementById('today-search');
+  var countEl = document.getElementById('today-count');
+  var rows = Array.from(document.querySelectorAll('#today-table tbody tr'));
+  var total = rows.length;
+  if (!input) return;
+  input.addEventListener('input', function () {
+    var q = input.value.trim().toLowerCase();
+    var visible = 0;
+    rows.forEach(function (row) {
+      var text = (row.dataset.search || '').toLowerCase();
+      var match = !q || text.includes(q);
+      row.style.display = match ? '' : 'none';
+      if (match) visible++;
+    });
+    if (countEl) countEl.textContent = q
+      ? visible + ' of ' + total + ' records'
+      : total + ' record' + (total === 1 ? '' : 's');
+  });
+}());
+`;
+
+  const datePickerScript = `
+(function () {
+  var trigger = document.getElementById('date-trigger');
+  var picker = document.getElementById('date-picker');
+  if (!trigger || !picker) return;
+  trigger.addEventListener('click', function () {
+    if (typeof picker.showPicker === 'function') {
+      try { picker.showPicker(); return; } catch (e) {}
+    }
+    picker.focus();
+    picker.click();
+  });
+  picker.addEventListener('change', function () {
+    if (!picker.value) return;
+    var url = new URL(window.location.href);
+    url.searchParams.set('date', picker.value);
+    window.location.href = url.toString();
+  });
+}());
+`;
+
+  const classFilterScript = `
+(function () {
+  var sel = document.getElementById('class-filter');
+  if (!sel) return;
+  sel.addEventListener('change', function () {
+    var url = new URL(window.location.href);
+    if (sel.value) url.searchParams.set('class', sel.value);
+    else url.searchParams.delete('class');
+    window.location.href = url.toString();
+  });
+}());
+`;
+
+  return layout(
+    c,
+    "Today's Attendance",
+    "today",
+    <>
+      <div style="margin-bottom: 1.5rem;">
+        <div style="font-size: 0.72rem; font-weight: 800; color: var(--primary); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.4rem;">
+          {isToday ? "Live feed" : "Historical view"}
+        </div>
+        <h1 style="margin: 0 0 0.4rem;">Attendance Records</h1>
+        <p class="text-muted" style="margin: 0; font-size: 0.9rem;">
+          {isToday
+            ? "All student check-ins recorded today across every class."
+            : `Reviewing attendance recorded on ${displayDate}.`}
+        </p>
+      </div>
+
+      {/* ── Date navigation ── */}
+      <div
+        style="
+          display: flex; align-items: center; justify-content: center; gap: 0.75rem;
+          margin-bottom: 1.25rem; padding: 0.6rem 0.9rem;
+          background: var(--surface); border: 1px solid var(--line);
+          border-radius: var(--rounded-lg); box-shadow: var(--shadow-sm);
+          position: relative;
+        "
+      >
+        <a
+          href={withParams({ date: prevDate })}
+          class="btn btn-secondary btn-icon"
+          aria-label="Previous day"
+          style="padding: 0.5rem 0.85rem; line-height: 1;"
+        >
+          ‹
+        </a>
+        <button
+          id="date-trigger"
+          type="button"
+          aria-label="Open calendar"
+          style="
+            display: inline-flex; align-items: center; gap: 0.5rem;
+            min-width: 240px; justify-content: center;
+            padding: 0.55rem 1.1rem; border-radius: var(--rounded-md);
+            background: transparent; border: 1px solid transparent;
+            font-family: inherit; font-size: 1rem; font-weight: 800;
+            color: var(--ink); cursor: pointer;
+            font-variant-numeric: tabular-nums;
+          "
+        >
+          <span>{displayDate}</span>
+          {relLabel && (
+            <span
+              style="
+                font-size: 0.72rem; font-weight: 700;
+                padding: 0.15rem 0.55rem; border-radius: 99px;
+                background: var(--primary-soft); color: var(--primary-hover);
+                text-transform: uppercase; letter-spacing: 0.05em;
+              "
+            >
+              {relLabel}
+            </span>
+          )}
+        </button>
+        <input
+          id="date-picker"
+          type="date"
+          value={selectedDate}
+          max={today}
+          style="
+            position: absolute; opacity: 0; pointer-events: none;
+            inset: 0; width: 1px; height: 1px;
+          "
+        />
+        <a
+          href={withParams({ date: nextDate })}
+          class="btn btn-secondary btn-icon"
+          aria-label="Next day"
+          style="padding: 0.5rem 0.85rem; line-height: 1;"
+          aria-disabled={nextDate > today ? "true" : undefined}
+        >
+          ›
+        </a>
+      </div>
+
+      {/* ── Class filter ── */}
+      {allClasses.length > 0 && (
+        <div
+          style="
+            display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;
+            margin-bottom: 1.5rem; font-size: 0.85rem; color: var(--muted);
+          "
+        >
+          <label for="class-filter" style="font-weight: 700; color: var(--ink);">
+            Class
+          </label>
+          <select
+            id="class-filter"
+            style="
+              padding: 0.5rem 0.85rem; border: 1px solid var(--line);
+              border-radius: var(--rounded-md); background: var(--surface);
+              font-family: inherit; font-size: 0.9rem; color: var(--ink);
+              min-width: 220px;
+            "
+          >
+            <option value="" selected={!selectedClassId}>All classes</option>
+            {allClasses.map((cls) => (
+              <option
+                value={cls.id}
+                selected={cls.id === selectedClassId}
+              >
+                {cls.code} — {cls.name}
+              </option>
+            ))}
+          </select>
+          {selectedClassId && (
+            <a href={withParams({ class: "" })} class="btn btn-ghost">
+              Clear filter
+            </a>
+          )}
+        </div>
+      )}
+
+      {/* ── Stat cards ── */}
+      <div class="grid" style="margin-bottom: 2rem;">
+        <div class="stat-card">
+          <div class="stat-label">Total Check-ins</div>
+          <div class="stat-value">{totalCount}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Unique Students</div>
+          <div class="stat-value">{uniqueStudents}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Active Classes</div>
+          <div class="stat-value">{uniqueClasses}</div>
+        </div>
+      </div>
+
+      {/* ── Search ── */}
+      <div
+        style="
+          display: flex; align-items: center; gap: 0.75rem;
+          background: white; border: 1px solid var(--line);
+          border-radius: var(--rounded-xl); padding: 0 1rem;
+          margin-bottom: 1.5rem; box-shadow: var(--shadow-sm);
+        "
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: var(--muted); flex-shrink:0;">
+          <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+        </svg>
+        <input
+          id="today-search"
+          type="search"
+          placeholder="Search by student name or class code…"
+          autocomplete="off"
+          style="
+            flex: 1; border: none; outline: none; background: transparent;
+            padding: 0.85rem 0; font-family: inherit; font-size: 0.95rem;
+            color: var(--ink);
+          "
+        />
+        <span id="today-count" style="color: var(--muted); font-size: 0.78rem; font-weight: 700; white-space: nowrap; flex-shrink: 0;">
+          {totalCount} record{totalCount === 1 ? "" : "s"}
+        </span>
+      </div>
+
+      {/* ── Table or empty state ── */}
+      {records.length === 0 ? (
+        <div class="empty-state">
+          {isToday
+            ? "No attendance check-ins recorded yet today. Start a class QR session to see records here."
+            : "No attendance recorded for this date."}
+        </div>
+      ) : (
+        <div class="table-container">
+          <table id="today-table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Student</th>
+                <th>Class</th>
+                <th>Check-out</th>
+                <th>Duration</th>
+                <th>Device</th>
+                <th>Country</th>
+              </tr>
+            </thead>
+            <tbody>
+              {records.map((r) => (
+                <tr data-search={`${r.studentName} ${r.classCode} ${r.className}`.toLowerCase()}>
+                  <td>
+                    <span
+                      class="badge badge-primary"
+                      style="font-variant-numeric: tabular-nums;"
+                    >
+                      {r.time}
+                    </span>
+                  </td>
+                  <td>
+                    <div class="font-semibold">{r.studentName}</div>
+                    <div class="text-muted text-sm">{r.studentId}</div>
+                  </td>
+                  <td>
+                    <a
+                      href={`/admin/classes/${r.classId}/attendance`}
+                      class="badge badge-primary"
+                      style="text-decoration: none; margin-bottom: 0.2rem; display: inline-block;"
+                    >
+                      {r.classCode}
+                    </a>
+                    <div class="text-muted text-sm">{r.className}</div>
+                  </td>
+                  <td>{r.checkoutTime ?? "—"}</td>
+                  <td>{r.duration ?? "—"}</td>
+                  <td>
+                    <span class="text-sm" style="text-transform: capitalize;">
+                      {r.deviceType ?? "unknown"}
+                    </span>
+                  </td>
+                  <td>{r.country ?? "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <script dangerouslySetInnerHTML={{ __html: searchScript }} />
+      <script dangerouslySetInnerHTML={{ __html: datePickerScript }} />
+      <script dangerouslySetInnerHTML={{ __html: classFilterScript }} />
+    </>,
+  );
+});
+
+// ── Per-class attendance dashboard ────────────────────────────────────
+adminRoutes.get("/classes/:id/attendance", async (c) => {
+  const classId = c.req.param("id");
+  const cls = await getClassFull(c.env.DB_lunar_attendance, classId);
+  if (!cls) return c.text("Class not found", 404);
+
+  const today = localDateKey();
+  const selectedDate = c.req.query("date") || today;
+  const isToday = selectedDate === today;
+  const prevDate = getDateOffset(selectedDate, -1);
+  const nextDate = getDateOffset(selectedDate, 1);
+  const displayDate = formatDisplayDate(selectedDate);
+  const relLabel = relativeLabel(selectedDate, today);
+
+  const dayRecords = await listAttendanceForDay(
+    c.env.DB_lunar_attendance,
+    selectedDate,
+  );
+  const records = dayRecords.filter((r) => r.classId === classId);
+  const totalCount = records.length;
+  const uniqueStudents = new Set(records.map((r) => r.studentId)).size;
+
+  function withParams(overrides: Record<string, string | undefined>) {
+    const params = new URLSearchParams();
+    const date = overrides.date ?? selectedDate;
+    if (date && date !== today) params.set("date", date);
+    const q = params.toString();
+    return q
+      ? `/admin/classes/${classId}/attendance?${q}`
+      : `/admin/classes/${classId}/attendance`;
+  }
+
+  const searchScript = `
+(function () {
+  var input = document.getElementById('class-search');
+  var countEl = document.getElementById('class-count');
+  var rows = Array.from(document.querySelectorAll('#class-att-table tbody tr'));
+  var total = rows.length;
+  if (!input) return;
+  input.addEventListener('input', function () {
+    var q = input.value.trim().toLowerCase();
+    var visible = 0;
+    rows.forEach(function (row) {
+      var text = (row.dataset.search || '').toLowerCase();
+      var match = !q || text.includes(q);
+      row.style.display = match ? '' : 'none';
+      if (match) visible++;
+    });
+    if (countEl) countEl.textContent = q
+      ? visible + ' of ' + total + ' records'
+      : total + ' record' + (total === 1 ? '' : 's');
+  });
+}());
+`;
+
+  const datePickerScript = `
+(function () {
+  var trigger = document.getElementById('date-trigger');
+  var picker = document.getElementById('date-picker');
+  if (!trigger || !picker) return;
+  trigger.addEventListener('click', function () {
+    if (typeof picker.showPicker === 'function') {
+      try { picker.showPicker(); return; } catch (e) {}
+    }
+    picker.focus();
+    picker.click();
+  });
+  picker.addEventListener('change', function () {
+    if (!picker.value) return;
+    var url = new URL(window.location.href);
+    url.searchParams.set('date', picker.value);
+    window.location.href = url.toString();
+  });
+}());
+`;
+
+  return layout(
+    c,
+    `${cls.code} Attendance`,
+    "classes",
+    <>
+      <div class="flex-between" style="margin-bottom: 1.5rem; gap: 1rem;">
+        <div class="gap-2">
+          <a
+            href="/admin/classes"
+            class="btn btn-secondary btn-icon"
+            title="Back to Classes"
+            style="margin-right: 0.5rem;"
+          >
+            <IconBack />
+          </a>
+          <div>
+            <div style="font-size: 0.72rem; font-weight: 800; color: var(--primary); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.3rem;">
+              Class attendance
+            </div>
+            <h1 style="margin: 0;">
+              {cls.name}{" "}
+              <span class="badge badge-primary" style="vertical-align: middle; margin-left: 0.5rem;">
+                {cls.code}
+              </span>
+            </h1>
+          </div>
+        </div>
+        <a
+          href={`/admin/classes/${classId}`}
+          class="btn btn-secondary"
+        >
+          Manage Roster →
+        </a>
+      </div>
+
+      {/* ── Date navigation ── */}
+      <div
+        style="
+          display: flex; align-items: center; justify-content: center; gap: 0.75rem;
+          margin-bottom: 1.5rem; padding: 0.6rem 0.9rem;
+          background: var(--surface); border: 1px solid var(--line);
+          border-radius: var(--rounded-lg); box-shadow: var(--shadow-sm);
+          position: relative;
+        "
+      >
+        <a
+          href={withParams({ date: prevDate })}
+          class="btn btn-secondary btn-icon"
+          aria-label="Previous day"
+          style="padding: 0.5rem 0.85rem; line-height: 1;"
+        >
+          ‹
+        </a>
+        <button
+          id="date-trigger"
+          type="button"
+          aria-label="Open calendar"
+          style="
+            display: inline-flex; align-items: center; gap: 0.5rem;
+            min-width: 240px; justify-content: center;
+            padding: 0.55rem 1.1rem; border-radius: var(--rounded-md);
+            background: transparent; border: 1px solid transparent;
+            font-family: inherit; font-size: 1rem; font-weight: 800;
+            color: var(--ink); cursor: pointer;
+            font-variant-numeric: tabular-nums;
+          "
+        >
+          <span>{displayDate}</span>
+          {relLabel && (
+            <span
+              style="
+                font-size: 0.72rem; font-weight: 700;
+                padding: 0.15rem 0.55rem; border-radius: 99px;
+                background: var(--primary-soft); color: var(--primary-hover);
+                text-transform: uppercase; letter-spacing: 0.05em;
+              "
+            >
+              {relLabel}
+            </span>
+          )}
+        </button>
+        <input
+          id="date-picker"
+          type="date"
+          value={selectedDate}
+          max={today}
+          style="
+            position: absolute; opacity: 0; pointer-events: none;
+            inset: 0; width: 1px; height: 1px;
+          "
+        />
+        <a
+          href={withParams({ date: nextDate })}
+          class="btn btn-secondary btn-icon"
+          aria-label="Next day"
+          style="padding: 0.5rem 0.85rem; line-height: 1;"
+          aria-disabled={nextDate > today ? "true" : undefined}
+        >
+          ›
+        </a>
+      </div>
+
+      {/* ── Stats ── */}
+      <div class="grid" style="margin-bottom: 2rem;">
+        <div class="stat-card">
+          <div class="stat-label">Check-ins</div>
+          <div class="stat-value">{totalCount}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Unique students</div>
+          <div class="stat-value">{uniqueStudents}</div>
+        </div>
+      </div>
+
+      {/* ── Search ── */}
+      <div
+        style="
+          display: flex; align-items: center; gap: 0.75rem;
+          background: white; border: 1px solid var(--line);
+          border-radius: var(--rounded-xl); padding: 0 1rem;
+          margin-bottom: 1.5rem; box-shadow: var(--shadow-sm);
+        "
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: var(--muted); flex-shrink:0;">
+          <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+        </svg>
+        <input
+          id="class-search"
+          type="search"
+          placeholder="Search by student name…"
+          autocomplete="off"
+          style="
+            flex: 1; border: none; outline: none; background: transparent;
+            padding: 0.85rem 0; font-family: inherit; font-size: 0.95rem;
+            color: var(--ink);
+          "
+        />
+        <span id="class-count" style="color: var(--muted); font-size: 0.78rem; font-weight: 700; white-space: nowrap; flex-shrink: 0;">
+          {totalCount} record{totalCount === 1 ? "" : "s"}
+        </span>
+      </div>
+
+      {/* ── Table or empty state ── */}
+      {records.length === 0 ? (
+        <div class="empty-state">
+          {isToday
+            ? "No attendance check-ins recorded yet today for this class."
+            : "No attendance recorded for this class on this date."}
+        </div>
+      ) : (
+        <div class="table-container">
+          <table id="class-att-table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Student</th>
+                <th>Check-out</th>
+                <th>Duration</th>
+                <th>Device</th>
+                <th>Country</th>
+              </tr>
+            </thead>
+            <tbody>
+              {records.map((r) => (
+                <tr data-search={`${r.studentName} ${r.studentId}`.toLowerCase()}>
+                  <td>
+                    <span class="badge badge-primary" style="font-variant-numeric: tabular-nums;">
+                      {r.time}
+                    </span>
+                  </td>
+                  <td>
+                    <div class="font-semibold">{r.studentName}</div>
+                    <div class="text-muted text-sm">{r.studentId}</div>
+                  </td>
+                  <td>{r.checkoutTime ?? "—"}</td>
+                  <td>{r.duration ?? "—"}</td>
+                  <td>
+                    <span class="text-sm" style="text-transform: capitalize;">
+                      {r.deviceType ?? "unknown"}
+                    </span>
+                  </td>
+                  <td>{r.country ?? "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <script dangerouslySetInnerHTML={{ __html: searchScript }} />
+      <script dangerouslySetInnerHTML={{ __html: datePickerScript }} />
+    </>,
+  );
+});
+
+// ── Attendance History (all classes, filterable, paginated) ───────────
+adminRoutes.get("/attendance/history", async (c) => {
+  const today = localDateKey();
+  const defaultFrom = getDateOffset(today, -29);
+
+  const from = c.req.query("from") || defaultFrom;
+  const to = c.req.query("to") || today;
+  const classId = c.req.query("class") || "";
+  const q = c.req.query("q") || "";
+  const sortRaw = c.req.query("sort") || "day";
+  const dirRaw = c.req.query("dir") || "desc";
+  const page = Math.max(parseInt(c.req.query("page") || "1", 10) || 1, 1);
+  const pageSize = 50;
+  const offset = (page - 1) * pageSize;
+
+  const sort: "day" | "student" | "class" =
+    sortRaw === "student" || sortRaw === "class" ? sortRaw : "day";
+  const dir: "asc" | "desc" = dirRaw === "asc" ? "asc" : "desc";
+
+  const [allClasses, { records, total }] = await Promise.all([
+    listAllClasses(c.env.DB_lunar_attendance),
+    listAttendanceHistory(c.env.DB_lunar_attendance, {
+      from,
+      to,
+      classId: classId || undefined,
+      q: q || undefined,
+      sort,
+      dir,
+      limit: pageSize,
+      offset,
+    }),
+  ]);
+
+  const totalPages = Math.max(Math.ceil(total / pageSize), 1);
+  const startRow = total === 0 ? 0 : offset + 1;
+  const endRow = Math.min(offset + records.length, total);
+
+  function withParams(overrides: Record<string, string | undefined>) {
+    const params = new URLSearchParams();
+    const merged: Record<string, string> = {
+      from,
+      to,
+      class: classId,
+      q,
+      sort,
+      dir,
+      page: String(page),
+    };
+    for (const [k, v] of Object.entries(overrides)) {
+      if (v === undefined) continue;
+      merged[k] = v;
+    }
+    if (merged.from && merged.from !== defaultFrom) params.set("from", merged.from);
+    if (merged.to && merged.to !== today) params.set("to", merged.to);
+    if (merged.class) params.set("class", merged.class);
+    if (merged.q) params.set("q", merged.q);
+    if (merged.sort && merged.sort !== "day") params.set("sort", merged.sort);
+    if (merged.dir && merged.dir !== "desc") params.set("dir", merged.dir);
+    if (merged.page && merged.page !== "1") params.set("page", merged.page);
+    const s = params.toString();
+    return s ? `/admin/attendance/history?${s}` : "/admin/attendance/history";
+  }
+
+  function sortLink(col: "day" | "student" | "class", label: string) {
+    const active = sort === col;
+    const nextDir: "asc" | "desc" = active && dir === "desc" ? "asc" : "desc";
+    const arrow = active ? (dir === "desc" ? " ↓" : " ↑") : "";
+    return (
+      <a
+        href={withParams({ sort: col, dir: nextDir, page: "1" })}
+        style={`color: inherit; text-decoration: none; ${active ? "color: var(--primary);" : ""}`}
+      >
+        {label}
+        {arrow}
+      </a>
+    );
+  }
+
+  return layout(
+    c,
+    "Attendance History",
+    "history",
+    <>
+      <div style="margin-bottom: 1.5rem;">
+        <div style="font-size: 0.72rem; font-weight: 800; color: var(--primary); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.4rem;">
+          Records
+        </div>
+        <h1 style="margin: 0 0 0.4rem;">Attendance History</h1>
+        <p class="text-muted" style="margin: 0; font-size: 0.9rem;">
+          Search across every class and date range. Defaults to the last 30 days.
+        </p>
+      </div>
+
+      {/* ── Filters ── */}
+      <form
+        method="get"
+        action="/admin/attendance/history"
+        style="
+          display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)) auto;
+          gap: 0.75rem; align-items: end;
+          padding: 1rem 1.25rem; margin-bottom: 1.5rem;
+          background: var(--surface); border: 1px solid var(--line);
+          border-radius: var(--rounded-lg); box-shadow: var(--shadow-sm);
+        "
+      >
+        <div>
+          <label
+            for="history-from"
+            style="display: block; font-size: 0.72rem; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.35rem;"
+          >
+            From
+          </label>
+          <input
+            id="history-from"
+            type="date"
+            name="from"
+            value={from}
+            max={to}
+            style="
+              width: 100%; padding: 0.55rem 0.75rem;
+              border: 1px solid var(--line); border-radius: var(--rounded-md);
+              font-family: inherit; font-size: 0.9rem; background: white; color: var(--ink);
+            "
+          />
+        </div>
+        <div>
+          <label
+            for="history-to"
+            style="display: block; font-size: 0.72rem; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.35rem;"
+          >
+            To
+          </label>
+          <input
+            id="history-to"
+            type="date"
+            name="to"
+            value={to}
+            min={from}
+            max={today}
+            style="
+              width: 100%; padding: 0.55rem 0.75rem;
+              border: 1px solid var(--line); border-radius: var(--rounded-md);
+              font-family: inherit; font-size: 0.9rem; background: white; color: var(--ink);
+            "
+          />
+        </div>
+        <div>
+          <label
+            for="history-class"
+            style="display: block; font-size: 0.72rem; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.35rem;"
+          >
+            Class
+          </label>
+          <select
+            id="history-class"
+            name="class"
+            style="
+              width: 100%; padding: 0.55rem 0.75rem;
+              border: 1px solid var(--line); border-radius: var(--rounded-md);
+              font-family: inherit; font-size: 0.9rem; background: white; color: var(--ink);
+            "
+          >
+            <option value="" selected={!classId}>All classes</option>
+            {allClasses.map((cls) => (
+              <option value={cls.id} selected={cls.id === classId}>
+                {cls.code} — {cls.name}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label
+            for="history-q"
+            style="display: block; font-size: 0.72rem; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.35rem;"
+          >
+            Student
+          </label>
+          <input
+            id="history-q"
+            type="search"
+            name="q"
+            value={q}
+            placeholder="Name or ID"
+            autocomplete="off"
+            style="
+              width: 100%; padding: 0.55rem 0.75rem;
+              border: 1px solid var(--line); border-radius: var(--rounded-md);
+              font-family: inherit; font-size: 0.9rem; background: white; color: var(--ink);
+            "
+          />
+        </div>
+        <div style="display: flex; gap: 0.5rem;">
+          <button type="submit" class="btn btn-primary">
+            Apply
+          </button>
+          <a href="/admin/attendance/history" class="btn btn-secondary">
+            Reset
+          </a>
+        </div>
+      </form>
+
+      {/* ── Result summary ── */}
+      <div
+        style="
+          display: flex; align-items: center; justify-content: space-between;
+          margin-bottom: 0.75rem; font-size: 0.85rem; color: var(--muted);
+        "
+      >
+        <div>
+          {total === 0
+            ? "No records match these filters."
+            : `Showing ${startRow}–${endRow} of ${total} records`}
+        </div>
+      </div>
+
+      {/* ── Table ── */}
+      {records.length === 0 ? (
+        <div class="empty-state">
+          No attendance records found for the selected filters.
+        </div>
+      ) : (
+        <div class="table-container">
+          <table>
+            <thead style="position: sticky; top: 0; background: var(--surface); z-index: 1;">
+              <tr>
+                <th>{sortLink("day", "Date")}</th>
+                <th>Time</th>
+                <th>{sortLink("student", "Student")}</th>
+                <th>{sortLink("class", "Class")}</th>
+                <th>Check-out</th>
+                <th>Duration</th>
+                <th>Device</th>
+                <th>Country</th>
+              </tr>
+            </thead>
+            <tbody>
+              {records.map((r) => (
+                <tr>
+                  <td style="font-variant-numeric: tabular-nums;">{r.day}</td>
+                  <td>
+                    <span class="badge badge-primary" style="font-variant-numeric: tabular-nums;">
+                      {r.time}
+                    </span>
+                  </td>
+                  <td>
+                    <div class="font-semibold">{r.studentName}</div>
+                    <div class="text-muted text-sm">{r.studentId}</div>
+                  </td>
+                  <td>
+                    <a
+                      href={`/admin/classes/${r.classId}/attendance?date=${r.day}`}
+                      class="badge badge-primary"
+                      style="text-decoration: none; margin-bottom: 0.2rem; display: inline-block;"
+                    >
+                      {r.classCode}
+                    </a>
+                    <div class="text-muted text-sm">{r.className}</div>
+                  </td>
+                  <td>{r.checkoutTime ?? "—"}</td>
+                  <td>{r.duration ?? "—"}</td>
+                  <td>
+                    <span class="text-sm" style="text-transform: capitalize;">
+                      {r.deviceType ?? "unknown"}
+                    </span>
+                  </td>
+                  <td>{r.country ?? "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* ── Pagination ── */}
+      {totalPages > 1 && (
+        <div
+          style="
+            display: flex; align-items: center; justify-content: center; gap: 0.5rem;
+            margin-top: 1.5rem;
+          "
+        >
+          <a
+            href={withParams({ page: String(Math.max(page - 1, 1)) })}
+            class="btn btn-secondary"
+            aria-disabled={page === 1 ? "true" : undefined}
+            style={page === 1 ? "pointer-events: none; opacity: 0.5;" : ""}
+          >
+            ← Previous
+          </a>
+          <span style="font-size: 0.85rem; color: var(--muted); padding: 0 0.75rem;">
+            Page {page} of {totalPages}
+          </span>
+          <a
+            href={withParams({ page: String(Math.min(page + 1, totalPages)) })}
+            class="btn btn-secondary"
+            aria-disabled={page === totalPages ? "true" : undefined}
+            style={page === totalPages ? "pointer-events: none; opacity: 0.5;" : ""}
+          >
+            Next →
+          </a>
+        </div>
+      )}
+    </>,
+  );
+});
+
+
+// ── Admin Global QR Session ───────────────────────────────────────────
+// Admins can start a global QR session without a Teacher PIN. The
+// POST /api/sessions endpoint accepts admin auth as an alternative path.
+adminRoutes.get("/attendance/qr", (c) => {
+  return c.html(
+    <Layout
+      role="admin"
+      title="Global QR – Admin"
+      adminActiveTab="global-qr"
+      qrScript={true}
+    >
+      <div style="margin-bottom: 1.5rem;">
+        <div style="font-size: 0.72rem; font-weight: 800; color: var(--primary); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 0.4rem;">
+          Live session
+        </div>
+        <h1 style="margin: 0 0 0.4rem;">Global QR Session</h1>
+        <p class="text-muted" style="margin: 0; font-size: 0.9rem;">
+          Display this QR for any class. Students scan it from their registered
+          device to mark attendance automatically.
+        </p>
+      </div>
+
+      <div
+        style="
+          display: grid; grid-template-columns: minmax(300px, 1fr) minmax(260px, 1fr);
+          gap: 1.5rem; align-items: start;
+        "
+      >
+        <section
+          style="
+            background: var(--surface); border: 1px solid var(--line);
+            border-radius: var(--rounded-lg); box-shadow: var(--shadow-sm);
+            padding: 1.5rem; text-align: center;
+          "
+        >
+          <h2 style="margin: 0 0 0.5rem; font-size: 1.1rem;">Student scan code</h2>
+          <p class="text-muted text-sm" style="margin: 0 0 1rem;">
+            Students scan this code from their registered device.
+          </p>
+          <div
+            id="qr-wrap"
+            style="display: inline-block; background: white; padding: 1rem; border-radius: var(--rounded-md);"
+          >
+            <div id="qr"></div>
+          </div>
+          <p
+            id="scan-url"
+            class="text-muted text-sm"
+            style="margin-top: 0.75rem; word-break: break-all;"
+          ></p>
+        </section>
+
+        <section style="display: flex; flex-direction: column; gap: 1rem;">
+          <div
+            style="
+              background: var(--surface); border: 1px solid var(--line);
+              border-radius: var(--rounded-lg); box-shadow: var(--shadow-sm);
+              padding: 1.25rem;
+            "
+          >
+            <div class="text-muted text-sm" style="margin-bottom: 0.25rem;">
+              Session
+            </div>
+            <div
+              id="sessionId"
+              style="font-size: 1.5rem; font-weight: 700; font-variant-numeric: tabular-nums;"
+            >
+              Starting
+            </div>
+            <p
+              id="status"
+              class="text-muted text-sm"
+              style="margin: 0.5rem 0 0;"
+            >
+              Waiting for QR connection
+            </p>
+            <button
+              id="restartBtn"
+              type="button"
+              class="btn btn-secondary"
+              style="margin-top: 1rem; width: 100%;"
+            >
+              Restart Session
+            </button>
+          </div>
+
+          <div
+            style="
+              background: var(--surface); border: 1px solid var(--line);
+              border-radius: var(--rounded-lg); box-shadow: var(--shadow-sm);
+              padding: 1.25rem;
+            "
+          >
+            <h2 style="margin: 0 0 0.5rem; font-size: 1.05rem;">Recent scans</h2>
+            <p class="text-muted text-sm" style="margin: 0 0 0.75rem;">
+              Successful scans appear here as students mark attendance.
+            </p>
+            <div id="log" style="display: flex; flex-direction: column; gap: 0.4rem;">
+              <p data-empty-log="true" class="text-muted text-sm" style="margin: 0;">
+                No scans yet.
+              </p>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <script
+        dangerouslySetInnerHTML={{
+          __html: `
+        const classId = '__all__'
+        let ws = null
+        let statusTimer = null
+
+        async function startSession() {
+          document.getElementById('sessionId').textContent = 'Starting'
+          const res = await fetch('/api/sessions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ classId })
+          })
+          const data = await res.json()
+          if (!res.ok) throw new Error(data.error || 'Could not start attendance')
+          document.getElementById('sessionId').textContent = data.sessionId.slice(0, 8)
+          connectWs(data.sessionId)
+        }
+
+        function connectWs(sessionId) {
+          if (ws) ws.close()
+          const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
+          ws = new WebSocket(protocol + '//' + location.host + '/api/sessions/' + sessionId + '/ws')
+          ws.onmessage = (event) => {
+            const msg = JSON.parse(event.data)
+            if (msg.type === 'connected') {
+              renderQr(msg.url)
+              document.getElementById('status').textContent = 'Listening for scans...'
+              document.getElementById('status').style.color = 'var(--success)'
+            }
+            if (msg.type === 'attended') {
+              showAttended(msg.studentName, msg.alreadyMarked, msg.checkedOut, msg.className, msg.classCode)
+              appendLog(msg.studentName, msg.alreadyMarked, msg.checkedOut, msg.className, msg.classCode)
+            }
+          }
+          let reconnectDelay = 1000
+          ws.onclose = () => {
+            setTimeout(() => { connectWs(sessionId); reconnectDelay = Math.min(reconnectDelay * 2, 30000) },
+                       reconnectDelay + Math.random() * 1000)
+          }
+        }
+
+        function renderQr(url) {
+          const el = document.getElementById('qr')
+          el.innerHTML = ''
+          new QRCode(el, { text: url, width: 280, height: 280, correctLevel: QRCode.CorrectLevel.H })
+          document.getElementById('scan-url').textContent = url
+        }
+
+        function showAttended(name, alreadyMarked, checkedOut, className, classCode) {
+          const status = document.getElementById('status')
+          const classInfo = classCode ? ' (' + classCode + ')' : ''
+          if (checkedOut) {
+            status.textContent = name + classInfo + ' checked out'
+          } else {
+            status.textContent = alreadyMarked ? name + classInfo + ' was already present' : name + classInfo + ' marked present'
+          }
+          clearTimeout(statusTimer)
+          statusTimer = setTimeout(() => {
+            status.textContent = 'Listening for scans...'
+          }, 3500)
+        }
+
+        function appendLog(name, alreadyMarked, checkedOut, className, classCode) {
+          const row = document.createElement('p')
+          row.style.margin = '0'
+          row.style.fontSize = '0.85rem'
+          let actionText = ' - '
+          if (checkedOut) actionText = ' checked out - '
+          else if (alreadyMarked) actionText = ' already present - '
+          const classInfo = classCode ? ' (' + classCode + ') ' : ''
+          row.textContent = name + classInfo + actionText + new Date().toLocaleTimeString()
+          const log = document.getElementById('log')
+          const empty = log.querySelector('[data-empty-log]')
+          if (empty) empty.remove()
+          log.prepend(row)
+        }
+
+        document.getElementById('restartBtn').addEventListener('click', () => startSession().catch(showError))
+
+        function showError(error) {
+          document.getElementById('status').textContent = error.message
+          document.getElementById('status').style.color = 'var(--danger)'
+        }
+
+        startSession().catch(showError)
+      `,
+        }}
+      />
+    </Layout>,
+  );
 });

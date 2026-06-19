@@ -43,7 +43,12 @@ export interface ExternalStudentAttendanceSummary {
 export interface ExternalStudentAttendanceRecord {
   day: string;
   time: string;
+  checkoutTime: string | null;
+  duration: string | null;
   sessionId: string;
+  classId: string;
+  classCode: string;
+  className: string;
   requesterIp: string | null;
   userAgent: string | null;
   deviceType: string | null;
@@ -69,6 +74,17 @@ let schemaEnsured = false;
 
 function nowSeconds() {
   return Math.floor(Date.now() / 1000);
+}
+
+function formatDuration(seconds: number | null) {
+  if (!seconds || seconds <= 0) return null;
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  if (hours > 0) {
+    return `${hours}h ${remainingMinutes}m`;
+  }
+  return `${minutes}m`;
 }
 
 function randomToken(prefix: string) {
@@ -245,21 +261,27 @@ export async function getTeacherBySessionToken(
     .first<ExternalTeacher>();
 }
 
-export async function listTeacherClasses(db: D1Database, teacherId: string) {
+export async function listTeacherClasses(
+  db: D1Database,
+  teacherId: string,
+): Promise<(ExternalClass & { studentCount: number })[]> {
   //
   const { results } = await db
     .prepare(
-      `SELECT c.id, c.name, c.code
+      `SELECT c.id, c.name, c.code, COUNT(sc.student_id) AS studentCount
          FROM teacher_classes tc
          JOIN classes c ON c.id = tc.class_id
+         LEFT JOIN student_classes sc ON sc.class_id = c.id
         WHERE tc.teacher_id = ?
+        GROUP BY c.id, c.name, c.code
         ORDER BY c.code`,
     )
     .bind(teacherId)
-    .all<ExternalClass>();
+    .all<ExternalClass & { studentCount: number }>();
 
   return results ?? [];
 }
+
 
 export async function teacherCanAccessClass(
   db: D1Database,
@@ -640,26 +662,52 @@ export async function listStudentAttendanceRecords(
   //
   const { results } = await db
     .prepare(
-      `SELECT attendance_day AS day,
-              time(attended_at, 'unixepoch', '+5 hours', '+45 minutes') AS time,
-              session_id AS sessionId,
-              requester_ip AS requesterIp,
-              user_agent AS userAgent,
-              device_type AS deviceType,
-              country,
-              client_timezone AS clientTimezone,
-              client_language AS clientLanguage,
-              client_platform AS clientPlatform,
-              screen_size AS screenSize
-         FROM attendance_records
-        WHERE class_id = ?
-          AND student_id = ?
-        ORDER BY attended_at DESC`,
+      `SELECT r.attendance_day AS day,
+              time(r.attended_at, 'unixepoch', '+5 hours', '+45 minutes') AS time,
+              CASE WHEN r.checked_out_at IS NOT NULL THEN time(r.checked_out_at, 'unixepoch', '+5 hours', '+45 minutes') END AS checkoutTime,
+              CASE WHEN r.checked_out_at IS NOT NULL THEN r.checked_out_at - r.attended_at ELSE NULL END AS durationSeconds,
+              r.session_id AS sessionId,
+              r.class_id AS classId,
+              c.code AS classCode,
+              c.name AS className,
+              r.requester_ip AS requesterIp,
+              r.user_agent AS userAgent,
+              r.device_type AS deviceType,
+              r.country,
+              r.client_timezone AS clientTimezone,
+              r.client_language AS clientLanguage,
+              r.client_platform AS clientPlatform,
+              r.screen_size AS screenSize
+         FROM attendance_records r
+         JOIN classes c ON c.id = r.class_id
+        WHERE r.class_id = ?
+          AND r.student_id = ?
+        ORDER BY r.attended_at DESC`,
     )
     .bind(classId, studentId)
-    .all<ExternalStudentAttendanceRecord>();
+    .all<{
+      day: string;
+      time: string;
+      checkoutTime: string | null;
+      durationSeconds: number | null;
+      sessionId: string;
+      classId: string;
+      classCode: string;
+      className: string;
+      requesterIp: string | null;
+      userAgent: string | null;
+      deviceType: string | null;
+      country: string | null;
+      clientTimezone: string | null;
+      clientLanguage: string | null;
+      clientPlatform: string | null;
+      screenSize: string | null;
+    }>();
 
-  return results ?? [];
+  return (results ?? []).map((row) => ({
+    ...row,
+    duration: formatDuration(row.durationSeconds),
+  }));
 }
 
 export async function listAllTeachers(db: D1Database, search?: string) {
@@ -868,7 +916,9 @@ export async function listAllAttendanceRecords(db: D1Database, limit = 100) {
     .prepare(
       `SELECT r.id, r.student_name AS studentName, r.attendance_day AS day,
               time(r.attended_at, 'unixepoch', '+5 hours', '+45 minutes') AS time,
-              c.code AS classCode, r.class_id AS classId, r.student_id AS studentId,
+              CASE WHEN r.checked_out_at IS NOT NULL THEN time(r.checked_out_at, 'unixepoch', '+5 hours', '+45 minutes') END AS checkoutTime,
+              CASE WHEN r.checked_out_at IS NOT NULL THEN r.checked_out_at - r.attended_at ELSE NULL END AS durationSeconds,
+              c.code AS classCode, c.name AS className, r.class_id AS classId, r.student_id AS studentId,
               r.device_type AS deviceType, r.country
          FROM attendance_records r
          JOIN classes c ON c.id = r.class_id
@@ -881,13 +931,20 @@ export async function listAllAttendanceRecords(db: D1Database, limit = 100) {
       studentName: string;
       day: string;
       time: string;
+      checkoutTime: string | null;
+      durationSeconds: number | null;
       classCode: string;
+      className: string;
       classId: string;
       studentId: string;
       deviceType: string | null;
       country: string | null;
     }>();
-  return results ?? [];
+
+  return (results ?? []).map((row) => ({
+    ...row,
+    duration: formatDuration(row.durationSeconds),
+  }));
 }
 export async function deleteAttendanceRecord(db: D1Database, id: string) {
   await db
@@ -900,7 +957,9 @@ export async function listAllAttendanceRecordsForExport(db: D1Database) {
     .prepare(
       `SELECT r.id, r.student_name AS studentName, r.attendance_day AS day,
               time(r.attended_at, 'unixepoch', '+5 hours', '+45 minutes') AS time,
-              c.code AS classCode, r.student_id AS studentId,
+              CASE WHEN r.checked_out_at IS NOT NULL THEN time(r.checked_out_at, 'unixepoch', '+5 hours', '+45 minutes') END AS checkoutTime,
+              CASE WHEN r.checked_out_at IS NOT NULL THEN r.checked_out_at - r.attended_at ELSE NULL END AS durationSeconds,
+              c.code AS classCode, c.name AS className, r.student_id AS studentId,
               r.requester_ip AS requesterIp, r.user_agent AS userAgent,
               r.device_type AS deviceType, r.country, r.client_timezone AS clientTimezone
          FROM attendance_records r
@@ -912,6 +971,8 @@ export async function listAllAttendanceRecordsForExport(db: D1Database) {
       studentName: string;
       day: string;
       time: string;
+      checkoutTime: string | null;
+      durationSeconds: number | null;
       classCode: string;
       studentId: string;
       requesterIp: string | null;
@@ -920,7 +981,10 @@ export async function listAllAttendanceRecordsForExport(db: D1Database) {
       country: string | null;
       clientTimezone: string | null;
     }>();
-  return results ?? [];
+  return (results ?? []).map((row) => ({
+    ...row,
+    duration: formatDuration(row.durationSeconds),
+  }));
 }
 export async function getAdminStats(db: D1Database) {
   const [teachers, students, classes, records] = await Promise.all([
@@ -979,3 +1043,259 @@ export async function createStudentWithContact(db: D1Database, name: string, ema
     .run();
   return { id };
 }
+
+export async function listStudentEnrolledClassesForTeacher(
+  db: D1Database,
+  studentId: string,
+  teacherId?: string,
+) {
+  if (teacherId) {
+    const { results } = await db
+      .prepare(
+        `SELECT c.id, c.name, c.code
+           FROM student_classes sc
+           JOIN classes c ON c.id = sc.class_id
+           JOIN teacher_classes tc ON tc.class_id = c.id
+          WHERE sc.student_id = ?
+            AND tc.teacher_id = ?
+          ORDER BY c.code`,
+      )
+      .bind(studentId, teacherId)
+      .all<ExternalClass>();
+    return results ?? [];
+  }
+  
+  const { results } = await db
+    .prepare(
+      `SELECT c.id, c.name, c.code
+         FROM student_classes sc
+         JOIN classes c ON c.id = sc.class_id
+        WHERE sc.student_id = ?
+        ORDER BY c.code`,
+    )
+    .bind(studentId)
+    .all<ExternalClass>();
+
+  return results ?? [];
+}
+
+export async function verifyStudentAccessForTeacher(
+  db: D1Database,
+  accessToken: string,
+  teacherId: string,
+) {
+  return db
+    .prepare(
+      `SELECT s.id AS studentId, s.name AS studentName, s.email AS studentEmail
+         FROM student_access_tokens sat
+         JOIN students s ON s.id = sat.student_id
+         JOIN student_classes sc ON sc.student_id = s.id
+         JOIN teacher_classes tc ON tc.class_id = sc.class_id
+        WHERE sat.token = ?
+          AND sat.revoked_at IS NULL
+          AND sat.expires_at > ?
+          AND sat.last_used_at > ?
+          AND tc.teacher_id = ?
+        LIMIT 1`,
+    )
+    .bind(
+      accessToken,
+      nowSeconds(),
+      nowSeconds() - STUDENT_IDLE_TIMEOUT_SECONDS,
+      teacherId,
+    )
+    .first<ExternalStudentAccess>();
+}
+
+// ── Today's Attendance ────────────────────────────────────────────────
+
+export interface TodayAttendanceRecord {
+  id: string;
+  studentName: string;
+  studentId: string;
+  className: string;
+  classCode: string;
+  classId: string;
+  /** Local time string e.g. "09:32:15" (NPT +05:45) */
+  time: string;
+  checkoutTime: string | null;
+  duration: string | null;
+  deviceType: string | null;
+  country: string | null;
+}
+
+/**
+ * List all attendance records for a given local date key (YYYY-MM-DD).
+ * When `options.teacherId` is supplied, results are scoped to that teacher's
+ * assigned classes only — prevents data leakage between teachers.
+ */
+export async function listAttendanceForDay(
+  db: D1Database,
+  day: string,
+  options?: { teacherId?: string },
+): Promise<TodayAttendanceRecord[]> {
+  if (options?.teacherId) {
+    // Filtered path: JOIN teacher_classes to scope to the teacher's classes.
+    // Uses a JOIN instead of a subquery so D1 can use an index efficiently.
+    const { results } = await db
+      .prepare(
+        `SELECT r.id,
+                r.student_name   AS studentName,
+                r.student_id     AS studentId,
+                c.name           AS className,
+                c.code           AS classCode,
+                r.class_id       AS classId,
+                time(r.attended_at, 'unixepoch', '+5 hours', '+45 minutes') AS time,
+                CASE WHEN r.checked_out_at IS NOT NULL THEN time(r.checked_out_at, 'unixepoch', '+5 hours', '+45 minutes') END AS checkoutTime,
+                CASE WHEN r.checked_out_at IS NOT NULL THEN r.checked_out_at - r.attended_at ELSE NULL END AS durationSeconds,
+                r.device_type    AS deviceType,
+                r.country
+           FROM attendance_records r
+           JOIN classes c          ON c.id = r.class_id
+           JOIN teacher_classes tc ON tc.class_id = r.class_id
+          WHERE r.attendance_day = ?
+            AND tc.teacher_id = ?
+          ORDER BY r.attended_at DESC`,
+      )
+
+      .bind(day, options.teacherId)
+      .all<TodayAttendanceRecord>();
+    return (results ?? []).map((row) => ({
+      ...row,
+      duration: formatDuration((row as any).durationSeconds ?? null),
+    }));
+  }
+
+  // Unfiltered path: admin sees all records for the day.
+  const { results } = await db
+    .prepare(
+      `SELECT r.id,
+              r.student_name   AS studentName,
+              r.student_id     AS studentId,
+              c.name           AS className,
+              c.code           AS classCode,
+              r.class_id       AS classId,
+              time(r.attended_at, 'unixepoch', '+5 hours', '+45 minutes') AS time,
+              CASE WHEN r.checked_out_at IS NOT NULL THEN time(r.checked_out_at, 'unixepoch', '+5 hours', '+45 minutes') END AS checkoutTime,
+              CASE WHEN r.checked_out_at IS NOT NULL THEN r.checked_out_at - r.attended_at ELSE NULL END AS durationSeconds,
+              r.device_type    AS deviceType,
+              r.country
+         FROM attendance_records r
+         JOIN classes c ON c.id = r.class_id
+        WHERE r.attendance_day = ?
+        ORDER BY r.attended_at DESC`,
+    )
+    .bind(day)
+    .all<TodayAttendanceRecord>();
+  return (results ?? []).map((row) => ({
+    ...row,
+    duration: formatDuration((row as any).durationSeconds ?? null),
+  }));
+}
+
+// ── Attendance History (filtered, paginated) ──────────────────────────
+
+export interface AttendanceHistoryRecord extends TodayAttendanceRecord {
+  day: string;
+}
+
+export interface AttendanceHistoryFilters {
+  classId?: string;
+  from?: string;
+  to?: string;
+  q?: string;
+  teacherId?: string;
+  sort?: "day" | "student" | "class";
+  dir?: "asc" | "desc";
+  limit?: number;
+  offset?: number;
+}
+
+const HISTORY_SORT_COLUMNS: Record<string, string> = {
+  day: "r.attended_at",
+  student: "r.student_name",
+  class: "c.code",
+};
+
+export async function listAttendanceHistory(
+  db: D1Database,
+  filters: AttendanceHistoryFilters,
+): Promise<{ records: AttendanceHistoryRecord[]; total: number }> {
+  const where: string[] = [];
+  const params: (string | number)[] = [];
+
+  if (filters.teacherId) {
+    where.push(
+      `EXISTS (SELECT 1 FROM teacher_classes tc WHERE tc.class_id = r.class_id AND tc.teacher_id = ?)`,
+    );
+    params.push(filters.teacherId);
+  }
+  if (filters.from) {
+    where.push(`r.attendance_day >= ?`);
+    params.push(filters.from);
+  }
+  if (filters.to) {
+    where.push(`r.attendance_day <= ?`);
+    params.push(filters.to);
+  }
+  if (filters.classId) {
+    where.push(`r.class_id = ?`);
+    params.push(filters.classId);
+  }
+  if (filters.q) {
+    const needle = `%${filters.q.toLowerCase()}%`;
+    where.push(
+      `(lower(r.student_name) LIKE ? OR lower(r.student_id) LIKE ?)`,
+    );
+    params.push(needle, needle);
+  }
+
+  const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const sortCol =
+    HISTORY_SORT_COLUMNS[filters.sort ?? "day"] ?? HISTORY_SORT_COLUMNS.day;
+  const dir = filters.dir === "asc" ? "ASC" : "DESC";
+  const limit = Math.min(Math.max(filters.limit ?? 50, 1), 200);
+  const offset = Math.max(filters.offset ?? 0, 0);
+
+  const totalRow = await db
+    .prepare(
+      `SELECT COUNT(*) AS total
+         FROM attendance_records r
+         JOIN classes c ON c.id = r.class_id
+         ${whereSql}`,
+    )
+    .bind(...params)
+    .first<{ total: number }>();
+  const total = totalRow?.total ?? 0;
+
+  const { results } = await db
+    .prepare(
+      `SELECT r.id,
+              r.student_name   AS studentName,
+              r.student_id     AS studentId,
+              c.name           AS className,
+              c.code           AS classCode,
+              r.class_id       AS classId,
+              r.attendance_day AS day,
+              time(r.attended_at, 'unixepoch', '+5 hours', '+45 minutes') AS time,
+              CASE WHEN r.checked_out_at IS NOT NULL THEN time(r.checked_out_at, 'unixepoch', '+5 hours', '+45 minutes') END AS checkoutTime,
+              CASE WHEN r.checked_out_at IS NOT NULL THEN r.checked_out_at - r.attended_at ELSE NULL END AS durationSeconds,
+              r.device_type    AS deviceType,
+              r.country
+         FROM attendance_records r
+         JOIN classes c ON c.id = r.class_id
+         ${whereSql}
+        ORDER BY ${sortCol} ${dir}, r.attended_at DESC
+        LIMIT ? OFFSET ?`,
+    )
+    .bind(...params, limit, offset)
+    .all<AttendanceHistoryRecord & { durationSeconds: number | null }>();
+
+  const records = (results ?? []).map((row) => ({
+    ...row,
+    duration: formatDuration(row.durationSeconds ?? null),
+  })) as AttendanceHistoryRecord[];
+
+  return { records, total };
+}
+

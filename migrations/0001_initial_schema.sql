@@ -1,9 +1,11 @@
+-- Migration number: 0001 	 2026-06-18T16:13:38.982Z
+
 CREATE TABLE IF NOT EXISTS teachers (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   email TEXT NOT NULL UNIQUE,
   pin TEXT NOT NULL,
-  role TEXT NOT NULL DEFAULT 'teacher' -- 'admin', 'teacher', 'attendance_display'
+  role TEXT NOT NULL DEFAULT 'teacher'
 );
 
 CREATE TABLE IF NOT EXISTS classes (
@@ -38,7 +40,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   class_id TEXT NOT NULL,
   teacher_id TEXT NOT NULL,
   ip_address TEXT,
-  status TEXT NOT NULL DEFAULT 'active', -- active | paused | ended
+  status TEXT NOT NULL DEFAULT 'active',
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   ended_at INTEGER
 );
@@ -74,14 +76,6 @@ CREATE TABLE IF NOT EXISTS student_access_tokens (
   revoked_at INTEGER
 );
 
-CREATE TABLE IF NOT EXISTS allowed_wifi_ips (
-  id TEXT PRIMARY KEY,
-  label TEXT NOT NULL,
-  ip_address TEXT NOT NULL UNIQUE,
-  enabled INTEGER NOT NULL DEFAULT 1,
-  created_at INTEGER NOT NULL DEFAULT (unixepoch())
-);
-
 CREATE TABLE IF NOT EXISTS attendance_records (
   id TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,
@@ -108,11 +102,3 @@ CREATE INDEX IF NOT EXISTS idx_teacher_sessions_teacher ON teacher_sessions(teac
 CREATE INDEX IF NOT EXISTS idx_student_access_grants_student ON student_access_grants(student_id);
 CREATE INDEX IF NOT EXISTS idx_student_access_tokens_student ON student_access_tokens(student_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_teacher_class_day ON sessions(teacher_id, class_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_allowed_wifi_ips_enabled ON allowed_wifi_ips(enabled, ip_address);
-
-
--- Local:
--- wrangler d1 execute DB_lunar_attendance --local --file=./schema.sql
---
--- Remote:
--- wrangler d1 execute lunar-attendance --remote --file=./schema.sql

@@ -5,6 +5,7 @@ import { Env } from "./types";
 import { teacherRoutes } from "./routes/teacher";
 import { studentRoutes, STUDENT_SESSION_COOKIE } from "./routes/student";
 import { adminRoutes } from "./routes/admin";
+import { todayAttendanceRoutes } from "./routes/todayAttendance";
 import {
   AttendanceScanMetadata,
   claimStudentAccessGrant,
@@ -17,9 +18,13 @@ import {
   verifyStudentAccessForClass,
   getStudentBySessionToken,
   touchStudentSession,
+  getClassById,
 } from "./lib/externalDummy";
 import { localDateKey, SQLITE_LOCALTIME_MODIFIER } from "./lib/date";
 import { rateLimit, requestIp } from "./lib/rateLimit";
+import { getWifiAccessDecision } from "./lib/wifi";
+import { ADMIN_COOKIE, currentAdmin, verifyAdminToken } from "./lib/auth";
+import { error } from "node:console";
 
 export { AttendanceSession as lunarAttendance } from "./do/AttendanceSession";
 
@@ -183,6 +188,7 @@ app.use("*", async (c, next) => {
 
 app.route("/teacher", teacherRoutes);
 app.route("/admin", adminRoutes);
+app.route("/attendance", todayAttendanceRoutes);
 app.route("/", studentRoutes);
 
 // External dummy API backed by DB_lunar_attendance.
@@ -288,14 +294,23 @@ app.post("/external/attendance/mark", async (c) => {
   });
 });
 
-// Forward WebSocket upgrade to DO
+// Forward WebSocket upgrade to DO (teacher or admin initiator).
 app.get("/api/sessions/:id/ws", async (c) => {
-  const teacher = await getTeacherBySessionToken(
-    c.env.DB_lunar_attendance,
-    getCookie(c, TEACHER_SESSION_COOKIE),
-  );
-  if (!teacher) {
-    return c.json({ error: "Teacher login required" }, 401);
+  console.log("Hello bro");
+ const isAdmin =await currentAdmin(c)
+  let initiatorId: string;
+
+  if (isAdmin) {
+    initiatorId = "__admin__";
+  } else {
+    const teacher = await getTeacherBySessionToken(
+      c.env.DB_lunar_attendance,
+      getCookie(c, TEACHER_SESSION_COOKIE),
+    );
+    if (!teacher) {
+      return c.json({ error: "Teacher login required 11" }, 401);
+    }
+    initiatorId = teacher.id;
   }
 
   const sessionId = c.req.param("id");
@@ -306,7 +321,7 @@ app.get("/api/sessions/:id/ws", async (c) => {
         AND teacher_id = ?
       LIMIT 1`,
   )
-    .bind(sessionId, teacher.id)
+    .bind(sessionId, initiatorId)
     .first<{ id: string }>();
   if (!session) {
     return c.json({ error: "Session not found" }, 404);
@@ -340,6 +355,7 @@ app.post("/api/attend", async (c) => {
 
   const body = await c.req.json<{
     sessionId: string;
+    classId?: string;
     checkoutAnyway?: boolean;
     metadata?: AttendanceScanMetadata;
   }>();
@@ -363,23 +379,40 @@ app.post("/api/attend", async (c) => {
     return c.json({ error: "Invalid or inactive session" }, 400);
   }
 
-  // IP verification
   const studentIp = requestIp(c.req.raw);
-  if (
+  const wifiDecision = await getWifiAccessDecision(
+    c.env.DB_lunar_attendance,
+    studentIp,
+  );
+  if (wifiDecision.configured) {
+    if (!wifiDecision.allowed) {
+      return c.json(
+        { error: "Please connect to an approved Wi-Fi network, you ip is "+studentIp },
+        403,
+      );
+    }
+  } else if (
     session.ip_address &&
     session.ip_address !== studentIp &&
     session.ip_address !== "unknown" &&
     studentIp !== "unknown"
   ) {
-    // Basic IP match check. In local dev, IPs might be unknown.
     return c.json({ error: "Please connect to the class Wi-Fi network" }, 403);
+  }
+
+  let targetClassId = session.class_id;
+  if (session.class_id === "__all__") {
+    if (!body.classId) {
+      return c.json({ error: "Class selection required" }, 400);
+    }
+    targetClassId = body.classId;
   }
 
   // Check enrollment
   const isEnrolled = await c.env.DB_lunar_attendance.prepare(
     `SELECT 1 FROM student_classes WHERE student_id = ? AND class_id = ?`,
   )
-    .bind(student.id, session.class_id)
+    .bind(student.id, targetClassId)
     .first();
 
   if (!isEnrolled) {
@@ -392,7 +425,7 @@ app.post("/api/attend", async (c) => {
   const existingRecord = await c.env.DB_lunar_attendance.prepare(
     `SELECT id, attended_at, checked_out_at FROM attendance_records WHERE class_id = ? AND student_id = ? AND attendance_day = ? LIMIT 1`,
   )
-    .bind(session.class_id, student.id, attendanceDay)
+    .bind(targetClassId, student.id, attendanceDay)
     .first<{
       id: string;
       attended_at: number;
@@ -426,13 +459,15 @@ app.post("/api/attend", async (c) => {
   } else {
     await markExternalAttendance(c.env.DB_lunar_attendance, {
       sessionId: body.sessionId,
-      classId: session.class_id,
+      classId: targetClassId,
       studentId: student.id,
       studentName: student.name,
       attendanceDay,
       metadata: requestScanMetadata(c.req.raw, body.metadata),
     });
   }
+
+  const targetClass = await getClassById(c.env.DB_lunar_attendance, targetClassId);
 
   const doId = c.env.durable_objects_lunar_attendance.idFromName(
     body.sessionId,
@@ -446,6 +481,8 @@ app.post("/api/attend", async (c) => {
         studentName: student.name,
         alreadyMarked,
         checkedOut,
+        classCode: targetClass?.code,
+        className: targetClass?.name,
       }),
     }),
   );
@@ -458,9 +495,13 @@ app.post("/api/attend", async (c) => {
   });
 });
 
-// Create session (teacher)
+// Create session (teacher or admin). Admins skip PIN and class-assignment
+// checks; their sessions are recorded with the sentinel teacher_id `__admin__`.
 app.post("/api/sessions", async (c) => {
-  const sessionLimit = await requireRateLimit(
+  try{
+
+
+      const sessionLimit = await requireRateLimit(
     c.env.KV_lunar_attendance,
     `teacher-session:${requestIp(c.req.raw)}`,
     20,
@@ -470,20 +511,32 @@ app.post("/api/sessions", async (c) => {
     return c.json({ error: "Too many session requests" }, 429);
   }
 
-  const teacher = await getTeacherBySessionToken(
-    c.env.DB_lunar_attendance,
-    getCookie(c, TEACHER_SESSION_COOKIE),
-  );
-  if (!teacher) {
-    return c.json({ error: "Teacher login required" }, 401);
-  }
-  const teacherSessionToken = getCookie(c, TEACHER_SESSION_COOKIE);
-  const pinVerified = await isTeacherPinRecentlyVerified(
-    c.env.DB_lunar_attendance,
-    teacherSessionToken,
-  );
-  if (!pinVerified) {
-    return c.json({ error: "PIN verification required" }, 403);
+   const isAdmin =await currentAdmin(c)
+
+
+
+  let initiatorId: string;
+
+
+  if (isAdmin) {
+    initiatorId = "__admin__";
+  } else {
+    const teacher = await getTeacherBySessionToken(
+      c.env.DB_lunar_attendance,
+      getCookie(c, TEACHER_SESSION_COOKIE),
+    );
+    if (!teacher) { 
+      return c.json({ error: "Teacher login required 12 " }, 401);
+    }
+    const teacherSessionToken = getCookie(c, TEACHER_SESSION_COOKIE);
+    const pinVerified = await isTeacherPinRecentlyVerified(
+      c.env.DB_lunar_attendance,
+      teacherSessionToken,
+    );
+    if (!pinVerified) {
+      return c.json({ error: "PIN verification required" }, 403);
+    }
+    initiatorId = teacher.id;
   }
 
   const { classId } = await c.req.json<{
@@ -493,16 +546,18 @@ app.post("/api/sessions", async (c) => {
     return c.json({ error: "Missing or invalid class ID" }, 400);
   }
 
-  const allowed = await teacherCanAccessClass(
-    c.env.DB_lunar_attendance,
-    teacher.id,
-    classId,
-  );
-  if (!allowed) {
-    return c.json({ error: "Teacher is not assigned to this class" }, 403);
+  if (!isAdmin && classId !== "__all__") {
+    const allowed = await teacherCanAccessClass(
+      c.env.DB_lunar_attendance,
+      initiatorId,
+      classId,
+    );
+    if (!allowed) {
+      return c.json({ error: "Teacher is not assigned to this class" }, 403);
+    }
   }
 
-  const teacherIp = requestIp(c.req.raw);
+  const initiatorIp = requestIp(c.req.raw);
   let sessionId: string;
   const existing = await c.env.DB_lunar_attendance.prepare(
     `SELECT id
@@ -514,7 +569,7 @@ app.post("/api/sessions", async (c) => {
       ORDER BY created_at DESC
       LIMIT 1`,
   )
-    .bind(classId, teacher.id, localDateKey())
+    .bind(classId, initiatorId, localDateKey())
     .first<{ id: string }>();
 
   if (existing) {
@@ -522,14 +577,14 @@ app.post("/api/sessions", async (c) => {
     await c.env.DB_lunar_attendance.prepare(
       `UPDATE sessions SET ip_address = ? WHERE id = ?`,
     )
-      .bind(teacherIp, sessionId)
+      .bind(initiatorIp, sessionId)
       .run();
   } else {
     sessionId = crypto.randomUUID();
     await c.env.DB_lunar_attendance.prepare(
       `INSERT INTO sessions (id, class_id, teacher_id, ip_address) VALUES (?, ?, ?, ?)`,
     )
-      .bind(sessionId, classId, teacher.id, teacherIp)
+      .bind(sessionId, classId, initiatorId, initiatorIp)
       .run();
   }
 
@@ -548,6 +603,12 @@ app.post("/api/sessions", async (c) => {
   );
 
   return c.json({ sessionId });
+  }catch(e){
+
+       return c.json({ error: e }, 500);
+
+  }
+
 });
 
 export default app;
