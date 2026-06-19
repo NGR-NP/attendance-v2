@@ -256,7 +256,6 @@ studentRoutes.get("/attend", async (c) => {
         enrolledClasses = await listStudentEnrolledClassesForTeacher(
           c.env.DB_lunar_attendance,
           student.id,
-          session.teacher_id,
         );
         if (enrolledClasses.length === 0) {
           isNotEnrolled = true;

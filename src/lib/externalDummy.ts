@@ -1047,19 +1047,16 @@ export async function createStudentWithContact(db: D1Database, name: string, ema
 export async function listStudentEnrolledClassesForTeacher(
   db: D1Database,
   studentId: string,
-  teacherId: string,
 ) {
   const { results } = await db
     .prepare(
       `SELECT c.id, c.name, c.code
          FROM student_classes sc
          JOIN classes c ON c.id = sc.class_id
-         JOIN teacher_classes tc ON tc.class_id = sc.class_id
         WHERE sc.student_id = ?
-          AND tc.teacher_id = ?
         ORDER BY c.code`,
     )
-    .bind(studentId, teacherId)
+    .bind(studentId)
     .all<ExternalClass>();
 
   return results ?? [];
