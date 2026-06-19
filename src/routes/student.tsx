@@ -245,7 +245,7 @@ studentRoutes.get("/attend", async (c) => {
       status: string;
     }>();
 
-  let isMainQr = true;
+  let isMainQr = false;
   let enrolledClasses: any[] = [];
   let isNotEnrolled = false;
 
@@ -256,8 +256,21 @@ studentRoutes.get("/attend", async (c) => {
         enrolledClasses = await listStudentEnrolledClassesForTeacher(
           c.env.DB_lunar_attendance,
           student.id,
+          session.teacher_id,
         );
         if (enrolledClasses.length === 0) {
+          isNotEnrolled = true;
+        }
+      }
+    } else {
+      // Specific class QR - check enrollment directly
+      if (student) {
+        const isEnrolled = await c.env.DB_lunar_attendance.prepare(
+          `SELECT 1 FROM student_classes WHERE student_id = ? AND class_id = ?`,
+        )
+          .bind(student.id, session.class_id)
+          .first();
+        if (!isEnrolled) {
           isNotEnrolled = true;
         }
       }
@@ -274,7 +287,7 @@ studentRoutes.get("/attend", async (c) => {
 
       {isNotEnrolled ? (
         <div id="msg" class="status error">
-          You are not enrolled in any classes taught by this teacher.
+          {isMainQr ? "You are not enrolled in any classes taught by this teacher." : "You are not enrolled in this class."}
         </div>
       ) : (
         <>
