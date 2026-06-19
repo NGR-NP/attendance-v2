@@ -1,385 +1,468 @@
 /** @jsxImportSource hono/jsx */
 import { Hono } from "hono";
-import type { Context } from "hono";
 import { Env } from "../types";
 import { localDateKey } from "../lib/date";
-import { listAttendanceForDay } from "../lib/externalDummy";
-import { currentAdmin, currentTeacher } from "../lib/auth";
+import {
+  listAttendanceForDay,
+  listTeacherClasses,
+} from "../lib/externalDummy";
+import { currentTeacher } from "../lib/auth";
 import { Layout } from "../components/Layout";
 
 export const todayAttendanceRoutes = new Hono<{ Bindings: Env }>();
 
-type C = Context<{ Bindings: Env }>;
+// ── Helpers ──────────────────────────────────────────────────────────
+
+function getDateOffset(date: string, offset: number): string {
+  const [y, m, d] = date.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + offset);
+  return dt.toISOString().split("T")[0];
+}
+
+function formatDisplayDate(date: string): string {
+  const [y, m, d] = date.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.toLocaleDateString("en-US", {
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+}
+
+function relativeLabel(date: string, today: string): string | null {
+  if (date === today) return "Today";
+  if (date === getDateOffset(today, -1)) return "Yesterday";
+  if (date === getDateOffset(today, 1)) return "Tomorrow";
+  return null;
+}
 
 // ── Route handler ─────────────────────────────────────────────────────
+//
+// Teacher-scoped view of attendance for any selected date.
+// Admin uses /admin/attendance/today (admin cookie is path=/admin only).
 
 todayAttendanceRoutes.get("/today", async (c) => {
-  // ── 1. Determine viewer role ────────────────────────────────────────
-  let role: "admin" | "teacher" | null = null;
-  let teacherId: string | undefined;
-  let viewerName = "";
+  const teacher = await currentTeacher(c);
+  if (!teacher) return c.redirect("/teacher/login");
 
-  const isAdmin = await currentAdmin(c);
-  if (isAdmin) {
-    role = "admin";
-    viewerName = "Admin";
-  } else {
-    const teacher = await currentTeacher(c);
-    if (teacher) {
-      role = "teacher";
-      teacherId = teacher.id;
-      viewerName = teacher.name;
-    }
-  }
-
-  if (!role) return c.redirect("/teacher/class");
-
-  // ── 2. Get date from query or use today ────────────────────────────
-  const selectedDate = c.req.query("date") || localDateKey();
   const today = localDateKey();
-  
-  // Parse the date for navigation
-  const [year, month, day] = selectedDate.split("-").map(Number);
-  const currentDateObj = new Date(year, month - 1, day);
-  const prevDateObj = new Date(currentDateObj);
-  prevDateObj.setDate(prevDateObj.getDate() - 1);
-  const nextDateObj = new Date(currentDateObj);
-  nextDateObj.setDate(nextDateObj.getDate() + 1);
-  
-  const formatDate = (d: Date) => d.toISOString().split("T")[0];
-  const prevDate = formatDate(prevDateObj);
-  const nextDate = formatDate(nextDateObj);
+  const selectedDate = c.req.query("date") || today;
+  const selectedClassId = c.req.query("class") || "";
+  const isToday = selectedDate === today;
+  const prevDate = getDateOffset(selectedDate, -1);
+  const nextDate = getDateOffset(selectedDate, 1);
+  const displayDate = formatDisplayDate(selectedDate);
+  const relLabel = relativeLabel(selectedDate, today);
 
-  // ── 3. Load records for selected date ──────────────────────────────
-  const records = await listAttendanceForDay(
+  const availableClasses = await listTeacherClasses(
     c.env.DB_lunar_attendance,
-    selectedDate,
-    role === "teacher" ? { teacherId } : undefined,
+    teacher.id,
   );
 
+  let records = await listAttendanceForDay(
+    c.env.DB_lunar_attendance,
+    selectedDate,
+    { teacherId: teacher.id },
+  );
+  if (selectedClassId) {
+    records = records.filter((r) => r.classId === selectedClassId);
+  }
   const totalCount = records.length;
 
-  // ── 3. Build client scripts ────────────────────────────────────────
+  function withParams(overrides: Record<string, string | undefined>) {
+    const params = new URLSearchParams();
+    const date = overrides.date ?? selectedDate;
+    if (date && date !== today) params.set("date", date);
+    const cls = overrides.class ?? selectedClassId;
+    if (cls) params.set("class", cls);
+    const q = params.toString();
+    return q ? `/attendance/today?${q}` : "/attendance/today";
+  }
 
-  // Search script — re-counts from live tbody so dynamically added rows work
+  // ── Client scripts ────────────────────────────────────────────────
+
   const searchScript = `
 (function () {
-  var input = document.getElementById('search-input');
-  var countEl = document.getElementById('search-count');
-  if (!input) return;
+  var input = document.getElementById('attendance-search');
+  var countEl = document.getElementById('attendance-count');
+  var tbody = document.getElementById('attendance-tbody');
+  if (!input || !tbody) return;
   input.addEventListener('input', function () {
     var q = input.value.trim().toLowerCase();
-    var tbody = document.getElementById('today-tbody');
-    if (!tbody) return;
     var rows = Array.from(tbody.querySelectorAll('tr[data-search]'));
     var visible = 0;
     rows.forEach(function (row) {
-      var match = !q || (row.dataset.search || '').includes(q);
+      var match = !q || (row.dataset.search || '').indexOf(q) !== -1;
       row.style.display = match ? '' : 'none';
       if (match) visible++;
     });
-    if (countEl) countEl.textContent = q
-      ? visible + ' of ' + rows.length + ' records'
-      : rows.length + ' record' + (rows.length === 1 ? '' : 's');
+    if (countEl) {
+      countEl.textContent = q
+        ? visible + ' of ' + rows.length + ' shown'
+        : rows.length + ' record' + (rows.length === 1 ? '' : 's');
+    }
   });
 }());
 `;
 
-  // Teacher QR + WebSocket + live table update script
-  // NOTE: startSession() is NOT called on load — the teacher must click "Start QR Session"
-  const teacherQrScript = `
+  const datePickerScript = `
+(function () {
+  var trigger = document.getElementById('date-trigger');
+  var picker = document.getElementById('date-picker');
+  if (!trigger || !picker) return;
+  trigger.addEventListener('click', function () {
+    if (typeof picker.showPicker === 'function') {
+      try { picker.showPicker(); return; } catch (e) {}
+    }
+    picker.focus();
+    picker.click();
+  });
+  picker.addEventListener('change', function () {
+    if (!picker.value) return;
+    var url = new URL(window.location.href);
+    url.searchParams.set('date', picker.value);
+    window.location.href = url.toString();
+  });
+}());
+`;
+
+  const classFilterScript = `
+(function () {
+  var sel = document.getElementById('class-filter');
+  if (!sel) return;
+  sel.addEventListener('change', function () {
+    var url = new URL(window.location.href);
+    if (sel.value) url.searchParams.set('class', sel.value);
+    else url.searchParams.delete('class');
+    window.location.href = url.toString();
+  });
+}());
+`;
+
+  const qrScript = `
 (function () {
   var ws = null;
-  var started = false;
+  var qrStarted = false;
 
-  function setStatus(msg, cls) {
+  function setStatus(msg, isError) {
     var el = document.getElementById('qr-status');
     if (!el) return;
     el.textContent = msg;
-    el.className = cls || '';
+    el.style.color = isError ? 'var(--danger)' : 'var(--muted)';
   }
 
-  function renderQr(url) {
-    var el = document.getElementById('today-qr');
-    if (!el) return;
+  function setLive(on) {
+    var dot = document.getElementById('qr-live-dot');
+    if (dot) dot.style.display = on ? '' : 'none';
+  }
+
+  function renderQrCode(url) {
+    var el = document.getElementById('qr-canvas');
+    if (!el || typeof QRCode === 'undefined') return;
     el.innerHTML = '';
-    new QRCode(el, { text: url, width: 200, height: 200, correctLevel: QRCode.CorrectLevel.H });
-    var scanUrl = document.getElementById('qr-scan-url');
-    if (scanUrl) scanUrl.textContent = url;
+    new QRCode(el, { text: url, width: 220, height: 220, correctLevel: QRCode.CorrectLevel.H });
+    var urlEl = document.getElementById('qr-scan-url');
+    if (urlEl) urlEl.textContent = url;
   }
 
-  function appendLog(name, classCode, checkedOut, alreadyMarked) {
+  function addScanLog(studentName, classCode, action) {
     var log = document.getElementById('scan-log');
     if (!log) return;
     var empty = log.querySelector('[data-empty-log]');
     if (empty) empty.remove();
     var item = document.createElement('div');
     item.className = 'scan-log-item';
-    var action = checkedOut ? ' checked out' : alreadyMarked ? ' already present' : ' marked present';
+    var t = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
     var cls = classCode ? ' (' + classCode + ')' : '';
-    item.textContent = name + cls + action + ' · ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+    item.textContent = t + ' — ' + studentName + cls + ' ' + action;
     log.insertBefore(item, log.firstChild);
-    // cap at 8 items
     var items = log.querySelectorAll('.scan-log-item');
-    if (items.length > 8) items[items.length - 1].remove();
+    if (items.length > 10) items[items.length - 1].remove();
   }
 
   function prependTableRow(msg) {
-    var tbody = document.getElementById('today-tbody');
+    var tbody = document.getElementById('attendance-tbody');
     if (!tbody) return;
-    // remove empty-state row if present
     var emptyRow = tbody.querySelector('[data-empty-row]');
     if (emptyRow) emptyRow.remove();
-
-    var time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+    var t = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
     var classCode = msg.classCode || '—';
     var className = msg.className || '';
-    var searchVal = ((msg.studentName || '') + ' ' + classCode + ' ' + className).toLowerCase();
-
+    var studentName = msg.studentName || '—';
+    var searchVal = (studentName + ' ' + classCode + ' ' + className).toLowerCase();
     var tr = document.createElement('tr');
     tr.setAttribute('data-search', searchVal);
-    tr.className = 'new-row-flash';
     tr.innerHTML =
-      '<td><span class="time-badge">' + time + '</span></td>' +
-      '<td><div class="cell-name">' + (msg.studentName || '—') + '</div><div class="cell-sub">just now · live</div></td>' +
+      '<td><span class="time-badge">' + t + '</span></td>' +
+      '<td><div class="cell-name">' + studentName + '</div><div class="cell-sub">just now</div></td>' +
       '<td><span class="class-tag">' + classCode + '</span><div class="cell-sub">' + className + '</div></td>' +
-      '<td>—</td>' +
-      '<td>—</td>' +
-      '<td><span class="device-pill">—</span></td>' +
-      '<td>—</td>';
+      '<td>—</td><td>—</td>' +
+      '<td><span class="device-pill">—</span></td><td>—</td>';
     tbody.insertBefore(tr, tbody.firstChild);
-
-    // Update stat counter
-    var statEl = document.getElementById('stat-total');
-    if (statEl) statEl.textContent = String(parseInt(statEl.textContent || '0', 10) + 1);
-
-    // Update search count
-    var countEl = document.getElementById('search-count');
-    if (countEl && !document.getElementById('search-input').value) {
+    var countEl = document.getElementById('attendance-count');
+    var input = document.getElementById('attendance-search');
+    if (countEl && input && !input.value) {
       var rows = tbody.querySelectorAll('tr[data-search]');
       countEl.textContent = rows.length + ' record' + (rows.length === 1 ? '' : 's');
     }
   }
 
-  function connectWs(sessionId) {
-    if (ws) { try { ws.close(); } catch(e) {} }
+  function connectWebSocket(sessionId) {
+    if (ws) { try { ws.close(); } catch (e) {} }
     var protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(protocol + '//' + location.host + '/api/sessions/' + sessionId + '/ws');
     var reconnectDelay = 1500;
     ws.onmessage = function (event) {
       var msg = JSON.parse(event.data);
       if (msg.type === 'connected') {
-        renderQr(msg.url);
-        setStatus('Ready — students can scan to mark attendance', 'ok');
-        var dot = document.getElementById('live-dot');
-        if (dot) dot.style.display = '';
+        renderQrCode(msg.url);
+        setStatus('Ready for scans', false);
+        setLive(true);
       }
       if (msg.type === 'attended') {
-        appendLog(msg.studentName, msg.classCode, msg.checkedOut, msg.alreadyMarked);
+        var action = msg.checkedOut ? 'checked out' : msg.alreadyMarked ? 'already marked' : 'marked present';
+        addScanLog(msg.studentName, msg.classCode, action);
         prependTableRow(msg);
-        setStatus((msg.checkedOut ? msg.studentName + ' checked out' : msg.studentName + ' marked present') + (msg.classCode ? ' (' + msg.classCode + ')' : ''), 'ok');
+        setStatus(msg.studentName + ' ' + action, false);
       }
     };
     ws.onclose = function () {
-      setStatus('Reconnecting…');
-      var dot = document.getElementById('live-dot');
-      if (dot) dot.style.display = 'none';
+      setStatus('Reconnecting…', true);
+      setLive(false);
       setTimeout(function () {
         reconnectDelay = Math.min(reconnectDelay * 1.5, 20000);
-        connectWs(sessionId);
+        connectWebSocket(sessionId);
       }, reconnectDelay + Math.random() * 500);
     };
-    ws.onerror = function () { ws.close(); };
+    ws.onerror = function () { try { ws.close(); } catch (e) {} };
   }
 
-  async function startSession() {
-    started = true;
-    // Hide start button, show QR panel
+  async function startQrSession() {
+    if (qrStarted) return;
+    qrStarted = true;
     var startBtn = document.getElementById('qr-start-btn');
     if (startBtn) startBtn.style.display = 'none';
-    var livePanel = document.getElementById('live-panel');
-    if (livePanel) livePanel.style.display = '';
-
-    setStatus('Starting global QR session…');
+    var panel = document.getElementById('qr-panel');
+    if (panel) panel.style.display = '';
+    setStatus('Starting session…', false);
     try {
       var res = await fetch('/api/sessions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ classId: '__all__' })
+        body: JSON.stringify({ classId: '__all__' }),
       });
       var data = await res.json();
       if (!res.ok) {
-        if (res.status === 403) {
-          setStatus('PIN verification required — ', 'err');
-          var pinLink = document.createElement('a');
-          pinLink.href = '/teacher/attendance/main';
-          pinLink.textContent = 'go to Main QR to verify PIN';
-          pinLink.style.cssText = 'color: var(--primary); font-weight: 700;';
-          var statusEl = document.getElementById('qr-status');
-          if (statusEl) statusEl.appendChild(pinLink);
-        } else {
-          setStatus((data && data.error) || 'Could not start session', 'err');
-        }
+        qrStarted = false;
+        setStatus(data.error || 'Could not start session', true);
+        if (startBtn) startBtn.style.display = '';
+        if (panel) panel.style.display = 'none';
         return;
       }
-      connectWs(data.sessionId);
+      connectWebSocket(data.sessionId);
     } catch (err) {
-      setStatus('Network error — retrying in 5s…', 'err');
-      setTimeout(startSession, 5000);
+      qrStarted = false;
+      setStatus('Network error — retrying…', true);
+      if (startBtn) startBtn.style.display = '';
+      if (panel) panel.style.display = 'none';
+      setTimeout(startQrSession, 5000);
     }
   }
 
-  // Start button click
+  function restartQrSession() { qrStarted = false; startQrSession(); }
   var startBtn = document.getElementById('qr-start-btn');
-  if (startBtn) startBtn.addEventListener('click', function () { startSession(); });
-
-  // Restart button click (within the live panel)
+  if (startBtn) startBtn.addEventListener('click', startQrSession);
   var restartBtn = document.getElementById('qr-restart-btn');
-  if (restartBtn) restartBtn.addEventListener('click', function () { startSession(); });
+  if (restartBtn) restartBtn.addEventListener('click', restartQrSession);
 }());
 `;
 
-  // ── 4. Render ──────────────────────────────────────────────────────
+  // ── Render ─────────────────────────────────────────────────────────
   return c.html(
     <Layout
-      role={role}
+      role="teacher"
       title={`Attendance – ${selectedDate}`}
-      adminActiveTab={role === "admin" ? "today" : undefined}
-      teacherActiveTab={role === "teacher" ? "today" : undefined}
-      userName={viewerName}
-      qrScript={role === "teacher" && selectedDate === today}
+      teacherActiveTab="today"
+      userName={teacher.name}
+      qrScript={isToday}
     >
-      {/* ── Page heading with date navigation ── */}
+      {/* Page heading */}
       <div class="page-head">
         <div>
-          <div class="eyebrow">Attendance history</div>
+          <div class="eyebrow">Attendance</div>
           <h1>Attendance Records</h1>
           <p class="subtitle">
-            {role === "teacher"
-              ? selectedDate === today
-                ? "Click Start to activate a Global QR session — students scan to mark attendance for your classes."
-                : "View your past attendance records for this date."
-              : selectedDate === today
-              ? "All check-ins recorded today across every class."
-              : "View attendance records for this date across every class."}
+            {isToday
+              ? "Start a global QR session — students scan to mark attendance for any of your classes."
+              : "Reviewing past attendance records for this date."}
           </p>
         </div>
       </div>
 
-      {/* ── Date Navigation ── */}
+      {/* Date navigation: < June 19, 2026 ▾ > */}
       <div
         style="
-          display: flex; align-items: center; justify-content: space-between; gap: 1rem;
-          margin-bottom: 2rem; padding: 1rem 1.5rem;
-          background: var(--surface); border-radius: var(--rounded-lg);
-          border: 1px solid var(--line);
+          display: flex; align-items: center; justify-content: center; gap: 0.75rem;
+          margin-bottom: 1.25rem; padding: 0.6rem 0.9rem;
+          background: var(--surface); border: 1px solid var(--line);
+          border-radius: var(--rounded-lg); box-shadow: var(--shadow-sm);
+          position: relative;
         "
       >
         <a
-          href={`/attendance/today?date=${prevDate}`}
-          class="button secondary"
-          style="flex: 0 0 auto;"
+          href={withParams({ date: prevDate })}
+          class="btn-restart"
+          aria-label="Previous day"
+          style="padding: 0.5rem 0.85rem; font-size: 1rem; line-height: 1;"
         >
-          ← Previous day
+          ‹
         </a>
-        <div style="text-align: center; flex: 1;">
-          <input
-            type="date"
-            value={selectedDate}
-            onchange="window.location.href = '/attendance/today?date=' + this.value"
-            style="
-              padding: 0.5rem 1rem; border: 1px solid var(--line);
-              border-radius: var(--rounded-md); font-size: 1rem;
-              font-family: inherit; cursor: pointer; background: var(--bg);
-              color: var(--ink);
-            "
-          />
-          {selectedDate === today && (
-            <span style="display: block; font-size: 0.75rem; color: var(--muted); margin-top: 0.5rem;">Today</span>
-          )}
-        </div>
-        <a
-          href={`/attendance/today?date=${nextDate}`}
-          class="button secondary"
-          style="flex: 0 0 auto;"
+        <button
+          id="date-trigger"
+          type="button"
+          aria-label="Open calendar"
+          style="
+            display: inline-flex; align-items: center; gap: 0.5rem;
+            min-width: 240px; justify-content: center;
+            padding: 0.55rem 1.1rem; border-radius: var(--rounded-md);
+            background: transparent; border: 1px solid transparent;
+            font-family: inherit; font-size: 1rem; font-weight: 800;
+            color: var(--ink); cursor: pointer;
+            font-variant-numeric: tabular-nums;
+          "
         >
-          Next day →
+          <span>{displayDate}</span>
+          {relLabel && (
+            <span
+              style="
+                font-size: 0.72rem; font-weight: 700;
+                padding: 0.15rem 0.55rem; border-radius: 99px;
+                background: var(--primary-soft); color: var(--primary-hover);
+                text-transform: uppercase; letter-spacing: 0.05em;
+              "
+            >
+              {relLabel}
+            </span>
+          )}
+        </button>
+        <input
+          id="date-picker"
+          type="date"
+          value={selectedDate}
+          max={today}
+          style="
+            position: absolute; opacity: 0; pointer-events: none;
+            inset: 0; width: 1px; height: 1px;
+          "
+        />
+        <a
+          href={withParams({ date: nextDate })}
+          class="btn-restart"
+          aria-label="Next day"
+          style="padding: 0.5rem 0.85rem; font-size: 1rem; line-height: 1;"
+          aria-disabled={nextDate > today ? "true" : undefined}
+        >
+          ›
         </a>
       </div>
 
-      {/* ── TEACHER: Start button (shown only for today's date) ── */}
-      {role === "teacher" && selectedDate === today && (
+      {/* Class filter */}
+      {availableClasses.length > 1 && (
         <div
-          id="qr-start-btn"
           style="
-            display: flex; align-items: center; justify-content: center; gap: 1rem;
-            padding: 2rem; margin-bottom: 2rem;
-            background: var(--surface); border: 2px dashed var(--line);
-            border-radius: var(--rounded-xl); cursor: pointer;
-            transition: all 0.2s ease;
+            display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap;
+            margin-bottom: 1.5rem; font-size: 0.85rem; color: var(--muted);
           "
         >
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <polygon points="5 3 19 12 5 21 5 3" />
-          </svg>
-          <div>
-            <div style="font-weight: 800; font-size: 1rem; color: var(--ink);">Start QR Session</div>
-            <div style="font-size: 0.85rem; color: var(--muted); margin-top: 0.25rem;">
-              Click to generate a live QR code for student check-ins
-            </div>
-          </div>
+          <label for="class-filter" style="font-weight: 700; color: var(--ink);">
+            Class
+          </label>
+          <select
+            id="class-filter"
+            style="
+              padding: 0.5rem 0.85rem; border: 1px solid var(--line);
+              border-radius: var(--rounded-md); background: var(--surface);
+              font-family: inherit; font-size: 0.9rem; color: var(--ink);
+              min-width: 220px;
+            "
+          >
+            <option value="" selected={!selectedClassId}>All classes</option>
+            {availableClasses.map((cls) => (
+              <option
+                value={cls.id}
+                selected={cls.id === selectedClassId}
+              >
+                {cls.code} — {cls.name}
+              </option>
+            ))}
+          </select>
+          {selectedClassId && (
+            <a href={withParams({ class: "" })} class="btn-restart">
+              Clear filter
+            </a>
+          )}
         </div>
       )}
 
-      {/* ── TEACHER: Live QR panel (hidden until session starts, only on today's view) ── */}
-      {role === "teacher" && selectedDate === today && (
-        <div id="live-panel" class="live-panel" style="display: none;">
-          {/* Left: QR code */}
+      {/* QR session controls (today only) */}
+      {isToday && (
+        <button
+          id="qr-start-btn"
+          type="button"
+          style="
+            display: flex; align-items: center; justify-content: center; gap: 1rem;
+            width: 100%; padding: 1.5rem; margin-bottom: 1.5rem;
+            background: var(--surface); border: 2px dashed var(--line);
+            border-radius: var(--rounded-xl); cursor: pointer;
+            font-family: inherit; transition: border-color 0.2s, background 0.2s;
+          "
+        >
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polygon points="5 3 19 12 5 21 5 3" />
+          </svg>
+          <div style="text-align: left;">
+            <div style="font-weight: 800; font-size: 1rem; color: var(--ink);">
+              Start QR Session
+            </div>
+            <div style="font-size: 0.85rem; color: var(--muted); margin-top: 0.15rem;">
+              Generate a live QR code for student check-ins
+            </div>
+          </div>
+        </button>
+      )}
+
+      {isToday && (
+        <div id="qr-panel" class="live-panel" style="display: none;">
           <div>
             <div class="qr-frame">
-              <div id="today-qr" />
+              <div id="qr-canvas" />
             </div>
-            <p id="qr-scan-url" style="overflow-wrap: anywhere; font-size: 0.75rem; color: var(--muted); margin-top: 0.25rem;" />
+            <p id="qr-scan-url" style="overflow-wrap: anywhere; font-size: 0.72rem; color: var(--muted); margin-top: 0.4rem;" />
           </div>
-
-          {/* Right: status + log */}
           <div class="live-info">
             <div class="live-header">
               <div>
-                <h2>Global QR Session</h2>
-                <p
-                  style="margin: 0.25rem 0 0; font-size: 0.85rem; color: var(--muted); font-weight: 500;"
-                >
-                  Students scan this code to mark attendance for any of
-                  your classes today.
+                <h2 style="margin: 0;">Global QR Session</h2>
+                <p style="margin: 0.25rem 0 0; font-size: 0.85rem; color: var(--muted); font-weight: 500;">
+                  Students scan to mark attendance for any of your classes today.
                 </p>
               </div>
-              <div class="gap-2">
-                <span
-                  id="live-dot"
-                  class="live-dot"
-                  style="display: none;"
-                >
+              <div style="display: flex; align-items: center; gap: 0.5rem;">
+                <span id="qr-live-dot" class="live-dot" style="display: none;">
                   LIVE
                 </span>
-                <button
-                  id="qr-restart-btn"
-                  class="btn-restart"
-                  type="button"
-                >
+                <button id="qr-restart-btn" class="btn-restart" type="button">
                   ↺ Restart
                 </button>
               </div>
             </div>
-
-            <p id="qr-status" style="font-size: 0.9rem; font-weight: 600; color: var(--muted);">
+            <p id="qr-status" style="font-size: 0.9rem; font-weight: 600; color: var(--muted); margin: 0;">
               Starting session…
             </p>
-
             <div>
-              <div
-                style="font-size: 0.72rem; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 0.5rem;"
-              >
+              <div style="font-size: 0.72rem; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 0.5rem;">
                 Recent scans
               </div>
               <div id="scan-log" class="scan-log">
@@ -392,45 +475,28 @@ todayAttendanceRoutes.get("/today", async (c) => {
         </div>
       )}
 
-      {/* ── ADMIN: info notice ── */}
-      {role === "admin" && (
-        <div
-          style="
-            display: flex; align-items: center; gap: 1rem;
-            padding: 1rem 1.5rem; margin-bottom: 2rem;
-            background: var(--primary-soft); border: 1px solid #fde68a;
-            border-radius: var(--rounded-lg); font-size: 0.875rem;
-            font-weight: 600; color: var(--primary-hover);
-          "
-        >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
-          </svg>
-          QR sessions are started by teachers. Use the date navigation to view attendance records for any date.
-        </div>
-      )}
-
-      {/* ── Search bar ── */}
+      {/* Search */}
       <div class="search-bar">
         <span class="search-icon">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
+            <circle cx="11" cy="11" r="8" />
+            <line x1="21" y1="21" x2="16.65" y2="16.65" />
           </svg>
         </span>
         <input
-          id="search-input"
+          id="attendance-search"
           type="search"
           placeholder="Search by student name or class code…"
           autocomplete="off"
         />
-        <span id="search-count" class="search-count">
+        <span id="attendance-count" class="search-count">
           {totalCount} record{totalCount === 1 ? "" : "s"}
         </span>
       </div>
 
-      {/* ── Attendance table (always rendered — teacher's JS prepends rows live) ── */}
+      {/* Attendance table */}
       <div class="table-container">
-        <table id="attendance-table">
+        <table>
           <thead>
             <tr>
               <th>Time</th>
@@ -442,14 +508,14 @@ todayAttendanceRoutes.get("/today", async (c) => {
               <th>Country</th>
             </tr>
           </thead>
-          <tbody id="today-tbody">
+          <tbody id="attendance-tbody">
             {records.length === 0 ? (
               <tr data-empty-row="true">
                 <td
                   colspan={7}
                   style="text-align: center; padding: 4rem 2rem; color: var(--muted); font-weight: 500;"
                 >
-                  {selectedDate === today && role === "teacher"
+                  {isToday
                     ? "No check-ins yet — start a QR session above to begin."
                     : "No attendance recorded for this date."}
                 </td>
@@ -469,11 +535,7 @@ todayAttendanceRoutes.get("/today", async (c) => {
                   <td>
                     <a
                       class="class-tag"
-                      href={
-                        role === "admin"
-                          ? `/admin/classes/${r.classId}`
-                          : `/teacher/class/${r.classId}/attendance`
-                      }
+                      href={`/teacher/class/${r.classId}/attendance`}
                     >
                       {r.classCode}
                     </a>
@@ -493,8 +555,10 @@ todayAttendanceRoutes.get("/today", async (c) => {
       </div>
 
       <script dangerouslySetInnerHTML={{ __html: searchScript }} />
-      {role === "teacher" && (
-        <script dangerouslySetInnerHTML={{ __html: teacherQrScript }} />
+      <script dangerouslySetInnerHTML={{ __html: datePickerScript }} />
+      <script dangerouslySetInnerHTML={{ __html: classFilterScript }} />
+      {isToday && (
+        <script dangerouslySetInnerHTML={{ __html: qrScript }} />
       )}
     </Layout>,
   );
