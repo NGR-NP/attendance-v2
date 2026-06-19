@@ -72,16 +72,16 @@ export async function signAdminToken(secret: string): Promise<string> {
 
   return `${payload}.${hex}`;
 }
-// export async function currentAdmin(
-//   c: Context<{ Bindings: Env }>,
-// ): Promise<boolean> {
-//   const token = getCookie(c, ADMIN_COOKIE);
+export async function currentAdmin(
+  c: Context<{ Bindings: Env }>,
+): Promise<boolean> {
+  const token =  getCookie(c, ADMIN_COOKIE);
 
 
-//   if (!token) return false;
+  if (!token) return false;
 
-//   return verifyAdminToken(token, c.env.ADMIN_SECRET);
-// }
+  return  await verifyAdminToken(token, c.env.ADMIN_SECRET);
+}
 export async function currentTeacher(c: Context<{ Bindings: Env }>) {
   const token = getCookie(c, TEACHER_SESSION_COOKIE);
   if (!token) return null;

@@ -169,12 +169,7 @@ adminRoutes.post("/login", async (c) => {
     return loginPage(c, "Invalid secret. Please try again.");
   }
   const token = await signAdminToken(c.env.ADMIN_SECRET);
-  setCookie(c, ADMIN_COOKIE, token, {
-    path: "/admin",
-    httpOnly: true,
-    sameSite: "Lax",
-    maxAge: 86400,
-  });
+  setCookie(c, ADMIN_COOKIE, token);
   return c.redirect("/admin");
 });
 adminRoutes.get("/logout", async (c) => {
