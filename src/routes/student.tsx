@@ -256,7 +256,6 @@ studentRoutes.get("/attend", async (c) => {
         enrolledClasses = await listStudentEnrolledClassesForTeacher(
           c.env.DB_lunar_attendance,
           student.id,
-          session.teacher_id,
         );
         if (enrolledClasses.length === 0) {
           isNotEnrolled = true;
@@ -287,7 +286,7 @@ studentRoutes.get("/attend", async (c) => {
 
       {isNotEnrolled ? (
         <div id="msg" class="status error">
-          {isMainQr ? "You are not enrolled in any classes taught by this teacher." : "You are not enrolled in this class."}
+          {isMainQr ? "You are not enrolled in any classes." : "You are not enrolled in this class."}
         </div>
       ) : (
         <>

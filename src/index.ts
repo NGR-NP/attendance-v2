@@ -406,17 +406,6 @@ app.post("/api/attend", async (c) => {
       return c.json({ error: "Class selection required" }, 400);
     }
     targetClassId = body.classId;
-
-    // Check teacher assignment
-    const isTeacherAssigned = await c.env.DB_lunar_attendance.prepare(
-      `SELECT 1 FROM teacher_classes WHERE teacher_id = ? AND class_id = ?`,
-    )
-      .bind(session.teacher_id, targetClassId)
-      .first();
-
-    if (!isTeacherAssigned) {
-      return c.json({ error: "Teacher is not assigned to the selected class" }, 403);
-    }
   }
 
   // Check enrollment
