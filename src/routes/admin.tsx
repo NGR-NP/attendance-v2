@@ -145,6 +145,16 @@ function loginPage(c: AppContext, error?: string) {
     </html>,
   );
 }
+
+adminRoutes.use("*", async (c, next) => {
+  const path = new URL(c.req.url).pathname;
+  if (path === "/admin/login") return next();
+  const token = getCookie(c, ADMIN_COOKIE);
+  if (!token || !(await verifyAdminToken(token, c.env.ADMIN_SECRET))) {
+    return c.redirect("/admin/login");
+  }
+  await next();
+}); 
 adminRoutes.get("/login", async (c) => {
   // If already authenticated, redirect to dashboard
   const token = getCookie(c, ADMIN_COOKIE);
@@ -172,15 +182,7 @@ adminRoutes.get("/logout", async (c) => {
   return c.redirect("/admin/login");
 });
 // ── Auth middleware (protects all routes below) ──────────────────────
-adminRoutes.use("*", async (c, next) => {
-  const path = new URL(c.req.url).pathname;
-  if (path === "/admin/login") return next();
-  const token = getCookie(c, ADMIN_COOKIE);
-  if (!token || !(await verifyAdminToken(token, c.env.ADMIN_SECRET))) {
-    return c.redirect("/admin/login");
-  }
-  await next();
-});
+
 // ── Shared layout helper ─────────────────────────────────────────────
 function layout(
   c: AppContext,

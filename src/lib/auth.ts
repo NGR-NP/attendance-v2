@@ -11,9 +11,16 @@ export async function verifyAdminToken(
   secret: string,
 ): Promise<boolean> {
   try {
-    const [payload, hex] = token.split(".");
+    if (!token) return false;
+
+    console.log("Admin token :", token);
+    const decoded = decodeURIComponent(token);
+
+    const [payload, hex] = decoded.split(".");
     if (!payload || !hex) return false;
+
     const encoder = new TextEncoder();
+
     const key = await crypto.subtle.importKey(
       "raw",
       encoder.encode(secret),
@@ -21,17 +28,28 @@ export async function verifyAdminToken(
       false,
       ["verify"],
     );
-    const sigBytes = new Uint8Array(
-      hex.match(/.{2}/g)!.map((b) => parseInt(b, 16)),
+
+    const sigBytes = Uint8Array.from(
+      hex.match(/.{2}/g) ?? [],
+      (b) => parseInt(b, 16),
     );
-    return crypto.subtle.verify("HMAC", key, sigBytes, encoder.encode(payload));
-  } catch {
+
+    if (sigBytes.length === 0) return false;
+
+    return await crypto.subtle.verify(
+      "HMAC",
+      key,
+      sigBytes,
+      encoder.encode(payload),
+    );
+  } catch (err) {
+    console.error("verifyAdminToken error:", err);
     return false;
   }
 }
-
 export async function signAdminToken(secret: string): Promise<string> {
   const encoder = new TextEncoder();
+
   const key = await crypto.subtle.importKey(
     "raw",
     encoder.encode(secret),
@@ -39,22 +57,31 @@ export async function signAdminToken(secret: string): Promise<string> {
     false,
     ["sign"],
   );
+
   const payload = "admin:authenticated";
-  const sig = await crypto.subtle.sign("HMAC", key, encoder.encode(payload));
-  const hex = [...new Uint8Array(sig)]
+
+  const sig = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    encoder.encode(payload),
+  );
+
+  const hex = Array.from(new Uint8Array(sig))
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
+
   return `${payload}.${hex}`;
 }
+// export async function currentAdmin(
+//   c: Context<{ Bindings: Env }>,
+// ): Promise<boolean> {
+//   const token = getCookie(c, ADMIN_COOKIE);
 
-export async function currentAdmin(
-  c: Context<{ Bindings: Env }>,
-): Promise<boolean> {
-  const token = getCookie(c, ADMIN_COOKIE);
-  if (!token) return false;
-  return verifyAdminToken(token, c.env.ADMIN_SECRET);
-}
 
+//   if (!token) return false;
+
+//   return verifyAdminToken(token, c.env.ADMIN_SECRET);
+// }
 export async function currentTeacher(c: Context<{ Bindings: Env }>) {
   const token = getCookie(c, TEACHER_SESSION_COOKIE);
   if (!token) return null;
@@ -69,4 +96,14 @@ export async function currentTeacherSession(c: Context<{ Bindings: Env }>) {
     token,
   );
   return teacher ? { token, teacher } : null;
+}
+
+
+function normalizeToken(token: string | undefined | null): string | null {
+  if (!token) return null;
+  try {
+    return decodeURIComponent(token);
+  } catch {
+    return token; // fallback if already decoded
+  }
 }

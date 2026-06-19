@@ -23,7 +23,8 @@ import {
 import { localDateKey, SQLITE_LOCALTIME_MODIFIER } from "./lib/date";
 import { rateLimit, requestIp } from "./lib/rateLimit";
 import { getWifiAccessDecision } from "./lib/wifi";
-import { currentAdmin } from "./lib/auth";
+import { ADMIN_COOKIE, verifyAdminToken } from "./lib/auth";
+import { error } from "node:console";
 
 export { AttendanceSession as lunarAttendance } from "./do/AttendanceSession";
 
@@ -295,9 +296,15 @@ app.post("/external/attendance/mark", async (c) => {
 
 // Forward WebSocket upgrade to DO (teacher or admin initiator).
 app.get("/api/sessions/:id/ws", async (c) => {
-  const isAdmin = await currentAdmin(c);
+  console.log("Hello bro");
+    const adminToken = getCookie(c, ADMIN_COOKIE);
+
+
+  
+  let initiatorId: string;
+
   let ownerId: string;
-  if (isAdmin) {
+  if (!adminToken || !(await verifyAdminToken(adminToken, c.env.ADMIN_SECRET))) {
     ownerId = "__admin__";
   } else {
     const teacher = await getTeacherBySessionToken(
@@ -305,7 +312,7 @@ app.get("/api/sessions/:id/ws", async (c) => {
       getCookie(c, TEACHER_SESSION_COOKIE),
     );
     if (!teacher) {
-      return c.json({ error: "Teacher login required" }, 401);
+      return c.json({ error: "Teacher login required 11" }, 401);
     }
     ownerId = teacher.id;
   }
@@ -506,7 +513,10 @@ app.post("/api/attend", async (c) => {
 // Create session (teacher or admin). Admins skip PIN and class-assignment
 // checks; their sessions are recorded with the sentinel teacher_id `__admin__`.
 app.post("/api/sessions", async (c) => {
-  const sessionLimit = await requireRateLimit(
+  try{
+
+
+      const sessionLimit = await requireRateLimit(
     c.env.KV_lunar_attendance,
     `teacher-session:${requestIp(c.req.raw)}`,
     20,
@@ -516,10 +526,12 @@ app.post("/api/sessions", async (c) => {
     return c.json({ error: "Too many session requests" }, 429);
   }
 
-  const isAdmin = await currentAdmin(c);
+  const adminToken = getCookie(c, ADMIN_COOKIE);
 
+
+  
   let initiatorId: string;
-  if (isAdmin) {
+  if (!adminToken || !(await verifyAdminToken(adminToken, c.env.ADMIN_SECRET))) {
     initiatorId = "__admin__";
   } else {
     const teacher = await getTeacherBySessionToken(
@@ -527,7 +539,7 @@ app.post("/api/sessions", async (c) => {
       getCookie(c, TEACHER_SESSION_COOKIE),
     );
     if (!teacher) {
-      return c.json({ error: "Teacher login required" }, 401);
+      return c.json({ error: "Teacher login required 12" }, 401);
     }
     const teacherSessionToken = getCookie(c, TEACHER_SESSION_COOKIE);
     const pinVerified = await isTeacherPinRecentlyVerified(
@@ -547,7 +559,7 @@ app.post("/api/sessions", async (c) => {
     return c.json({ error: "Missing or invalid class ID" }, 400);
   }
 
-  if (!isAdmin && classId !== "__all__") {
+  if (!adminToken && classId !== "__all__") {
     const allowed = await teacherCanAccessClass(
       c.env.DB_lunar_attendance,
       initiatorId,
@@ -604,6 +616,12 @@ app.post("/api/sessions", async (c) => {
   );
 
   return c.json({ sessionId });
+  }catch(e){
+
+       return c.json({ error: e }, 500);
+
+  }
+
 });
 
 export default app;
