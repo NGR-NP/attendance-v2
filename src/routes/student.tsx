@@ -245,7 +245,7 @@ studentRoutes.get("/attend", async (c) => {
       status: string;
     }>();
 
-  let isMainQr = false;
+  let isMainQr = true;
   let enrolledClasses: any[] = [];
   let isNotEnrolled = false;
 
@@ -272,7 +272,7 @@ studentRoutes.get("/attend", async (c) => {
       <div class="eyebrow">Scan</div>
       <h1>Checking Attendance</h1>
       <p>Keep this page open until your attendance result appears.</p>
-      
+
       {isNotEnrolled ? (
         <div id="msg" class="status error">
           You are not enrolled in any classes taught by this teacher.
